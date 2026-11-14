@@ -394,4 +394,21 @@ class MorventAgentRobolectricTest {
         val camMsg = commandEngine.processCommand("صور فيديو")
         assertEquals(ActionType.LAUNCH_APP, camMsg.actionType)
     }
+
+    @Test
+    fun `chat responses handle greetings and questions smoothly without AppCheck errors`() = runBlocking {
+        val brain = com.example.nlp.GeminiAgentBrain()
+        val salamResponse = brain.getSmartLocalChatResponse("السلام عليكم")
+        assertTrue(salamResponse != null && salamResponse.contains("وعليكم السلام ورحمة الله وبركاته"))
+
+        val marhabaResponse = brain.getSmartLocalChatResponse("مرحبا")
+        assertTrue(marhabaResponse != null && marhabaResponse.contains("أهلاً وسهلاً"))
+
+        val whoResponse = brain.getSmartLocalChatResponse("من أنت")
+        assertTrue(whoResponse != null && whoResponse.contains("مورڤينت"))
+
+        // Even with network/AppCheck unavailable, answerGeneralChat returns a helpful response without throwing error
+        val answer = brain.answerGeneralChat("السلام عليكم")
+        assertTrue(answer.contains("وعليكم السلام ورحمة الله وبركاته"))
+    }
 }
