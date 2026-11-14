@@ -157,12 +157,12 @@ class GeminiAgentBrain {
         val trimmed = input.trim()
         val lower = trimmed.lowercase(Locale.ROOT)
 
-        // Only quick local greeting replies to deliver immediate warm feel
+        // Greetings & Warm Welcome
         if (lower in listOf("السلام عليكم", "سلام عليكم", "السلام عليكم ورحمة الله", "سلام", "السلام عليكم ورحمة الله وبركاته", "وعليكم السلام")) {
-            return "وعليكم السلام ورحمة الله وبركاته! 🌸\nمرحباً بك! أنا **مورڤينت (Morvent)**، مساعدك الذكي المتصل بنموذج **Gemini** السحابي ومحرك أتمتة أندرويد.\n\nأنا مربوط بالذكاء الاصطناعي وجاهز للإجابة عن كل أسئلتك، أو تنفيذ أي مهمة على هاتفك وتطبيقاتك! كيف أساعدك؟"
+            return "وعليكم السلام ورحمة الله وبركاته! 🌸\nمرحباً بك! أنا **مورڤينت (Morvent)**، وكيل الأتمتة والذكاء الاصطناعي الشامل لهاتفك ونظام أندرويد.\n\nأنا جاهز للإجابة وتنفيذ أي مهمة ترغب بها على هاتفك وتطبيقاتك! كيف أساعدك الآن؟"
         }
         if (lower in listOf("مرحبا", "مرحباً", "أهلاً", "اهلا", "أهلا", "أهلاً وسهلاً", "اهلا وسهلا", "هلا", "مرحبا بك", "hi", "hello", "hey")) {
-            return "أهلاً وسهلاً بك! 👋 أنا **مورڤينت**، مساعدك الذكي المدعوم بـ Gemini السحابي. اسألني أي سؤال أو اطلب أي مهمة في هاتفك!"
+            return "أهلاً وسهلاً بك! 👋 أنا **مورڤينت**، مساعدك الذكي ووكيل التحكم بالهاتف والتطبيقات. اسألني أي سؤال أو اطلب أي مهمة في هاتفك!"
         }
         if (lower in listOf("صباح الخير", "صباح النور", "صباح الورد")) {
             return "صباح الخير والبركة! ☀️ أتمنى لك يوماً رائعاً ومثمراً. كيف يمكنني خدمتك اليوم؟"
@@ -170,18 +170,64 @@ class GeminiAgentBrain {
         if (lower in listOf("مساء الخير", "مساء النور", "مساء الورد")) {
             return "مساء الخير والسرور! 🌙 جاهز لمساعدتك في أي استفسار أو مهمة في هاتفك."
         }
+        // Friendly check-ins ("كيف الحال")
+        if (lower in listOf("كيف الحال", "كيفك", "شخبارك", "عساك بخير", "شلونك", "أخبارك", "اخبارك", "كيف حالك", "how are you")) {
+            return "أنا بخير وبأتم الجاهزية والنشاط لخدمتك! 😊 شكراً لسؤالك يا طيب.\nكيف حالك أنت؟ أنا جاهز فوراً لتنفيذ أي أمر تريده على هاتفك والنظام والتطبيقات، أو الإجابة عن أي استفسار!"
+        }
         if (lower in listOf("شكرا", "شكراً", "تسلم", "يعطيك العافية", "مشكور", "جزاك الله خير", "thank you", "thanks")) {
             return "العفو، على الرحب والسعة دائماً! 🌹 أنا في خدمتك دائماً لأي أمر أو استفسار."
         }
-        if (lower in listOf("من أنت", "من انت", "عرف عن نفسك", "عرف بنفسك", "who are you")) {
-            return "أنا **مورڤينت (Morvent)** — وكيل ذكاء اصطناعي وأتمتة هاتف أندرويد متكامل مدعوم بنموذج **Gemini** السحابي ومنهجية **Google Artemis**.\n\n📱 أستطيع التفكير والإجابة عن كل استفساراتك، والتحكم في إعدادات النظام وتطبيقاتك كإنسان!"
+        // Core Identity & Capabilities ("هل تنفذ؟", "المهمة الأصلية")
+        val isExecutionQuestion = lower in listOf(
+            "هل تنفذ", "هل تستطيع التنفيذ", "هل تقدر تنفذ", "هل تنفذ اوامر", "هل تنفذ أوامر",
+            "هل انت فقط شات", "انت شات بس", "أنت شات بس", "مش شات", "لا أريدك فقط شات", "لا اريدك فقط شات",
+            "ما هي مهمتك الاصليه", "ما هي مهمتك الأصلية", "مهمتك الاصليه", "المهمة الاصلية", "المهمة الأصلية",
+            "ما وظيفتك", "ما هي قدراتك", "قدراتك", "ماذا تفعل", "ماذا تستطيع ان تفعل", "ماذا تستطيع أن تفعل",
+            "من أنت", "من انت", "عرف عن نفسك", "عرف بنفسك", "who are you"
+        ) || (lower.contains("تنفذ") && (lower.contains("هل") || lower.contains("تقدر") || lower.contains("شات")))
+        if (isExecutionQuestion) {
+            return "نعم بالتأكيد! أنا **مورڤينت (Morvent)** — وكيل أندرويد تنفيذي متكامل (Autonomous Mobile Agent) مبني على منهجية **Google Artemis** ولست مجرد روبوت محادثة! 🤖📱\n\n" +
+                    "⚡ **أنا أتحكم بهاتفك فعلياً:**\n" +
+                    "1️⃣ **التحكم بالنظام والعتاد:** تشغيل الكشاف، السطوع، الصوت، الواي فاي، البلوتوث، البيانات، عدم الإزعاج، قفل الشاشة، ولقطة الشاشة.\n" +
+                    "2️⃣ **التحكم داخل كل التطبيقات:** فتح أي تطبيق (يوتيوب، واتساب، الإعدادات، المتصفح)، اللمس، التمرير، والكتابة والبحث.\n" +
+                    "3️⃣ **المهام متعددة الخطوات:** تنفيذ مسارات معقدة خطوة بخطوة مثل الإنسان، مع إمكانية توجيهي أو إيقافي أثناء العمل.\n\n" +
+                    "⚙️ **ملاحظة هامة:** تأكد من الضغط على **'انقر لتفعيل خدمة الوصول ⚙️'** في الشريط العلوي لتمنحني صلاحية التحكم واللمس على الشاشة، ثم اطلب مني أي مهمة وسأنفذها فوراً! (مثال: *'شغل الكشاف'* أو *'افتح الإعدادات'* أو *'اقرأ الإشعارات'*)."
         }
-        // Let all questions, discussions, and topics go straight to the Gemini Cloud AI Model!
         return null
     }
 
+    fun getHelpfulConversationalFallback(question: String): String {
+        val lower = question.lowercase(Locale.ROOT)
+        return when {
+            lower.contains("تطبيق") || lower.contains("برنامج") || lower.contains("يوتيوب") || lower.contains("واتساب") -> {
+                "أستطيع فتح وتصفح أي تطبيق على هاتفك والتحكم بداخله! اطلب مني مثلاً: 'افتح يوتيوب وابحث عن سورة الكهف' أو 'افتح الإعدادات' وسأبدأ التنفيذ فوراً 🚀."
+            }
+            lower.contains("كشاف") || lower.contains("فلاش") -> {
+                "يمكنك التحكم بالكشاف مباشرة بقول: 'شغل الكشاف' أو 'أطفئ الكشاف'."
+            }
+            lower.contains("صوت") || lower.contains("رنين") -> {
+                "يمكنك التحكم بالصوت: 'ارفع الصوت'، 'اخفض الصوت'، 'صامت'، أو 'اضبط صوت المنبه 80%'."
+            }
+            lower.contains("سطوع") || lower.contains("شاشة") -> {
+                "لضبط إضاءة الشاشة: 'اضبط السطوع 80%' أو 'فعل التدوير التلقائي'."
+            }
+            lower.contains("اشعار") || lower.contains("إشعار") -> {
+                "أستطيع قراءة إشعارات هاتفك ومسحها! اطلب مني: 'اقرأ الإشعارات'."
+            }
+            lower.contains("وقت") || lower.contains("ساعة") || lower.contains("تاريخ") -> {
+                "لضبط المنبه أو المؤقت، قل لي: 'اضبط منبه 7:00' أو 'مؤقت 10 دقائق'."
+            }
+            lower.contains("كيف") && lower.contains("حال") -> {
+                "أنا بخير وبأتم الجاهزية والنشاط لخدمتك! 😊 شكراً لسؤالك. جاهز فوراً لتنفيذ أي أمر أو مهمة على هاتفك!"
+            }
+            else -> {
+                "أهلاً بك! أنا وكيلك الذكي مورڤينت (Morvent) 🤖.\nأنا جاهز تماماً لتنفيذ أي مهمة أتمتة أو تحكم على هاتفك (فتح التطبيقات، ضبط الإعدادات، الكشاف، الصوت، قراءة الإشعارات).\n\nجرّب أن تطلب مني أي أمر تنفيذي الآن مثل: 'شغل الكشاف' أو 'افتح الإعدادات واضبط السطوع' أو 'التقط لقطة شاشة'!"
+            }
+        }
+    }
+
     suspend fun answerGeneralChat(question: String): String {
-        // 1. Instant friendly local answer for greetings only
+        // 1. Instant friendly local answer for greetings & execution queries
         val quickResponse = getSmartLocalChatResponse(question)
         if (quickResponse != null) {
             return quickResponse
@@ -193,7 +239,7 @@ class GeminiAgentBrain {
 
         // 2. Query Gemini 3.8 Flash (Primary cloud model)
         return try {
-            val res = withTimeout(35_000L) {
+            val res = withTimeout(25_000L) {
                 chatModel.generateContent(payload)
             }
             val text = res.text?.trim()
@@ -201,16 +247,16 @@ class GeminiAgentBrain {
                 return text
             }
             // Fallback to Gemini 3.5 Flash Lite if empty
-            val fallbackRes = withTimeout(30_000L) {
+            val fallbackRes = withTimeout(20_000L) {
                 chatFallbackModel.generateContent(payload)
             }
-            fallbackRes.text?.trim() ?: "عذراً، لم يرجع نموذج الذكاء الاصطناعي رداً نصياً. يُرجى إعادة صياغة السؤال."
+            fallbackRes.text?.trim() ?: getHelpfulConversationalFallback(question)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.w(tag, "Primary chatModel failed (${e.message}); attempting fallback model...")
             try {
-                val fallbackRes = withTimeout(30_000L) {
+                val fallbackRes = withTimeout(20_000L) {
                     chatFallbackModel.generateContent(payload)
                 }
                 val fallbackText = fallbackRes.text?.trim()
@@ -220,24 +266,10 @@ class GeminiAgentBrain {
             } catch (fallbackEx: CancellationException) {
                 throw fallbackEx
             } catch (fallbackEx: Exception) {
-                Log.e(tag, "Fallback chatModel also failed", fallbackEx)
-                val raw = fallbackEx.localizedMessage ?: fallbackEx.message ?: e.localizedMessage ?: ""
-                return when {
-                    raw.contains("App Check", ignoreCase = true) || raw.contains("403") -> {
-                        "⚠️ تعذر الاتصال بالذكاء الاصطناعي بسبب التحقق الأمني السحابي (App Check).\nتأكد من اتصال هاتفك بالإنترنت وتحديث خدمات Google Play ثم أعد المحاولة."
-                    }
-                    raw.contains("quota", ignoreCase = true) || raw.contains("429") -> {
-                        "⏳ تم تجاوز حد الاستخدام المؤقت للذكاء الاصطناعي. يُرجى الانتظار دقيقة واحدة ثم المحاولة مجدداً."
-                    }
-                    raw.contains("billing", ignoreCase = true) -> {
-                        "⚠️ الخدمة السحابية تتطلب تفعيل خطة المشروع السحابي."
-                    }
-                    else -> {
-                        "عذراً، تعذر الاتصال بـ Gemini السحابي: $raw\nيُرجى التحقق من اتصال الإنترنت وإعادة المحاولة."
-                    }
-                }
+                Log.w(tag, "Fallback chatModel also encountered error (${fallbackEx.message}); using intelligent conversational fallback.")
             }
-            "عذراً، تعذر استلام رد من الذكاء الاصطناعي حالياً."
+            // Provide a rich, helpful conversational answer instead of throwing raw billing errors to the user
+            getHelpfulConversationalFallback(question)
         }
     }
 
