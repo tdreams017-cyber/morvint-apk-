@@ -157,107 +157,87 @@ class GeminiAgentBrain {
         val trimmed = input.trim()
         val lower = trimmed.lowercase(Locale.ROOT)
 
-        // Greetings
+        // Only quick local greeting replies to deliver immediate warm feel
         if (lower in listOf("السلام عليكم", "سلام عليكم", "السلام عليكم ورحمة الله", "سلام", "السلام عليكم ورحمة الله وبركاته", "وعليكم السلام")) {
-            return "وعليكم السلام ورحمة الله وبركاته! 🌸\nمرحباً بك! أنا **مورڤينت (Morvent)**، وكيل الذكاء الاصطناعي والأتمتة الشاملة لنظام أندرويد بالكامل.\n\nكيف يمكنني مساعدتك اليوم؟ يمكنك سؤالي عن أي شيء، أو أمري بالتحكم في إعدادات النظام أو تصفح أي تطبيق!"
+            return "وعليكم السلام ورحمة الله وبركاته! 🌸\nمرحباً بك! أنا **مورڤينت (Morvent)**، مساعدك الذكي المتصل بنموذج **Gemini** السحابي ومحرك أتمتة أندرويد.\n\nأنا مربوط بالذكاء الاصطناعي وجاهز للإجابة عن كل أسئلتك، أو تنفيذ أي مهمة على هاتفك وتطبيقاتك! كيف أساعدك؟"
         }
         if (lower in listOf("مرحبا", "مرحباً", "أهلاً", "اهلا", "أهلا", "أهلاً وسهلاً", "اهلا وسهلا", "هلا", "مرحبا بك", "hi", "hello", "hey")) {
-            return "أهلاً وسهلاً بك! 👋 أنا **مورڤينت**، مساعدك الذكي للتحكم بالهاتف والتطبيقات. ما الذي تود القيام به أو الاستفسار عنه؟"
+            return "أهلاً وسهلاً بك! 👋 أنا **مورڤينت**، مساعدك الذكي المدعوم بـ Gemini السحابي. اسألني أي سؤال أو اطلب أي مهمة في هاتفك!"
         }
         if (lower in listOf("صباح الخير", "صباح النور", "صباح الورد")) {
-            return "صباح الخير والبركة! ☀️ أتمنى لك يوماً رائعاً. كيف يمكنني خدمتك اليوم في هاتفك؟"
+            return "صباح الخير والبركة! ☀️ أتمنى لك يوماً رائعاً ومثمراً. كيف يمكنني خدمتك اليوم؟"
         }
         if (lower in listOf("مساء الخير", "مساء النور", "مساء الورد")) {
-            return "مساء الخير والسرور! 🌙 جاهز لمساعدتك في أي مهمة أو استفسار."
-        }
-        if (lower in listOf("كيف حالك", "كيفك", "شخبارك", "عساك بخير", "شلونك", "how are you")) {
-            return "أنا بخير وبأفضل حال وأعمل بكامل كفاءتي لخدمتك! 😊 شكراً لسؤالك. كيف حالك أنت، وما الذي تود أن أساعدك به الآن؟"
+            return "مساء الخير والسرور! 🌙 جاهز لمساعدتك في أي استفسار أو مهمة في هاتفك."
         }
         if (lower in listOf("شكرا", "شكراً", "تسلم", "يعطيك العافية", "مشكور", "جزاك الله خير", "thank you", "thanks")) {
-            return "العفو، على الرحب والسعة دائماً! 🌹 أنا في خدمتك دائماً لأي أمر تريده على هاتفك."
+            return "العفو، على الرحب والسعة دائماً! 🌹 أنا في خدمتك دائماً لأي أمر أو استفسار."
         }
-        if (lower in listOf("من أنت", "من انت", "عرف عن نفسك", "عرف بنفسك", "ما هو مورفنت", "ما هو مورفينت", "ما هو مورڤينت", "who are you")) {
-            return "أنا **مورڤينت (Morvent)** — وكيل أتمتة هاتف أندرويد متكامل بمستوى بشري مبني على منهجية Google Artemis.\n\n" +
-                    "📱 **أبرز قدراتي:**\n" +
-                    "• **تحكم كامل بالنظام:** السطوع، الصوت، الواي فاي، البلوتوث، البيانات، نقطة الاتصال، وضع الطيران، تدوير الشاشة، وعدم الإزعاج.\n" +
-                    "• **التحكم داخل كل التطبيقات:** فتح التطبيقات، اللمس، التمرير، الكتابة، وقراءة الشاشة.\n" +
-                    "• **تنفيذ المهام الطويلة:** متابعة المسارات المتعددة حتى 300 خطوة مع إمكانية توجيهي أو إيقافي أثناء العمل.\n" +
-                    "• **المحادثة والإجابة:** الرد على كافة أسئلتك واستفساراتك."
+        if (lower in listOf("من أنت", "من انت", "عرف عن نفسك", "عرف بنفسك", "who are you")) {
+            return "أنا **مورڤينت (Morvent)** — وكيل ذكاء اصطناعي وأتمتة هاتف أندرويد متكامل مدعوم بنموذج **Gemini** السحابي ومنهجية **Google Artemis**.\n\n📱 أستطيع التفكير والإجابة عن كل استفساراتك، والتحكم في إعدادات النظام وتطبيقاتك كإنسان!"
         }
-        if (lower in listOf("ماذا تستطيع ان تفعل", "ماذا تستطيع أن تفعل", "ما هي قدراتك", "قدراتك", "ماذا يمكنك فعله", "ماذا تفعل", "what can you do")) {
-            return "أستطيع التحكم في هاتفك ونظام أندرويد تماماً كما يتحكم الإنسان! 🤖\n\n" +
-                    "1️⃣ **العتاد والنظام:** تشغيل الكشاف، كتم ورفع الصوت، ضبط السطوع، تفعيل عدم الإزعاج، وقراءة إشعارات النظام ومسحها.\n" +
-                    "2️⃣ **التطبيقات:** فتح أي تطبيق (واتساب، يوتيوب، الإعدادات، المتصفح)، البحث، التنقل، والضغط على الأزرار.\n" +
-                    "3️⃣ **المحادثة والاستفسارات:** تقديم الإجابات والشروحات المفيدة.\n\n" +
-                    "جرّب أن تطلب مني مثلاً: *'افتح الإعدادات'* أو *'اقرأ الإشعارات'* أو اسألني أي سؤال تريده!"
-        }
+        // Let all questions, discussions, and topics go straight to the Gemini Cloud AI Model!
         return null
     }
 
-    fun getHelpfulLocalAnswer(question: String): String {
-        val lower = question.lowercase(Locale.ROOT)
-        val smartResponse = getSmartLocalChatResponse(question)
-        if (smartResponse != null) return smartResponse
-
-        return when {
-            lower.contains("وقت") || lower.contains("ساعة") || lower.contains("تاريخ") -> {
-                "يمكنك معرفة الوقت والتاريخ أو ضبط المنبه والمؤقت مباشرة! قل لي مثلاً: 'اضبط منبه 7:00' أو 'مؤقت 5 دقائق' وسأنفذه لك فوراً."
-            }
-            lower.contains("بطارية") || lower.contains("شحن") -> {
-                "يمكنك فحص حالة ونسبة شحن البطارية ودرجة حرارتها بقول: 'كم نسبة البطارية' وسأعطيك تقريراً شاملاً."
-            }
-            lower.contains("واي فاي") || lower.contains("وايفاي") || lower.contains("انترنت") || lower.contains("إنترنت") -> {
-                "للتحكم في الشبكة، قل لي: 'فعل الواي فاي' أو 'افتح لوحة الإنترنت' أو 'تبديل بيانات الجوال' وسأقوم بتعديلها في النظام."
-            }
-            lower.contains("صوت") || lower.contains("رنين") || lower.contains("منبه") -> {
-                "يمكنك التحكم الدقيق بمستويات الصوت: 'ارفع الصوت'، 'صامت'، 'اهتزاز'، أو 'صوت المنبه 80%' وسأضبطه مباشرة."
-            }
-            lower.contains("سطوع") || lower.contains("شاشة") -> {
-                "لضبط إضاءة الشاشة، قل: 'اضبط السطوع 80%' أو 'سطوع تلقائي' وسأغيره في النظام."
-            }
-            lower.contains("تطبيق") || lower.contains("برنامج") -> {
-                "أستطيع فتح أي تطبيق والتحكم بداخله! اطلب مني: 'افتح [اسم التطبيق]' ثم 'اضغط على [الزر]' أو 'ابحث عن [شيء]'."
-            }
-            else -> {
-                "أهلاً بك! لقد استلمت استفسارك: \"$question\".\n\nأنا أعمل في وضع الأتمتة والذكاء المتكامل، وجاهز لتنفيذ أي أمر تريده على هاتفك والنظام والتطبيقات مباشرة، أو الإجابة عن أي موضوع يخص أجهزتك ومهامك اليومية. اطلب مني أي شيء وسأنفذه لك فوراً! 🚀"
-            }
-        }
-    }
-
     suspend fun answerGeneralChat(question: String): String {
-        // 1. Instant friendly local answer for greetings & identity
+        // 1. Instant friendly local answer for greetings only
         val quickResponse = getSmartLocalChatResponse(question)
         if (quickResponse != null) {
             return quickResponse
         }
 
-        // 2. If cloud is known blocked or unavailable, use smart local answer
-        if (isCloudProjectBillingBlocked) {
-            return getHelpfulLocalAnswer(question)
-        }
-
         val payload = content {
             text(question)
         }
+
+        // 2. Query Gemini 3.8 Flash (Primary cloud model)
         return try {
-            val res = withTimeout(15_000L) {
+            val res = withTimeout(35_000L) {
                 chatModel.generateContent(payload)
             }
-            res.text?.trim() ?: run {
-                val fallbackRes = chatFallbackModel.generateContent(payload)
-                fallbackRes.text?.trim() ?: getHelpfulLocalAnswer(question)
+            val text = res.text?.trim()
+            if (!text.isNullOrBlank()) {
+                return text
             }
+            // Fallback to Gemini 3.5 Flash Lite if empty
+            val fallbackRes = withTimeout(30_000L) {
+                chatFallbackModel.generateContent(payload)
+            }
+            fallbackRes.text?.trim() ?: "عذراً، لم يرجع نموذج الذكاء الاصطناعي رداً نصياً. يُرجى إعادة صياغة السؤال."
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
-            val raw = e.localizedMessage ?: e.message ?: ""
-            Log.w(tag, "Cloud chat unavailable ($raw); switching seamlessly to local response.")
-            if (raw.contains("free tier is not available", ignoreCase = true) ||
-                raw.contains("billing", ignoreCase = true) ||
-                raw.contains("App Check", ignoreCase = true) ||
-                raw.contains("403")
-            ) {
-                isCloudProjectBillingBlocked = true
+            Log.w(tag, "Primary chatModel failed (${e.message}); attempting fallback model...")
+            try {
+                val fallbackRes = withTimeout(30_000L) {
+                    chatFallbackModel.generateContent(payload)
+                }
+                val fallbackText = fallbackRes.text?.trim()
+                if (!fallbackText.isNullOrBlank()) {
+                    return fallbackText
+                }
+            } catch (fallbackEx: CancellationException) {
+                throw fallbackEx
+            } catch (fallbackEx: Exception) {
+                Log.e(tag, "Fallback chatModel also failed", fallbackEx)
+                val raw = fallbackEx.localizedMessage ?: fallbackEx.message ?: e.localizedMessage ?: ""
+                return when {
+                    raw.contains("App Check", ignoreCase = true) || raw.contains("403") -> {
+                        "⚠️ تعذر الاتصال بالذكاء الاصطناعي بسبب التحقق الأمني السحابي (App Check).\nتأكد من اتصال هاتفك بالإنترنت وتحديث خدمات Google Play ثم أعد المحاولة."
+                    }
+                    raw.contains("quota", ignoreCase = true) || raw.contains("429") -> {
+                        "⏳ تم تجاوز حد الاستخدام المؤقت للذكاء الاصطناعي. يُرجى الانتظار دقيقة واحدة ثم المحاولة مجدداً."
+                    }
+                    raw.contains("billing", ignoreCase = true) -> {
+                        "⚠️ الخدمة السحابية تتطلب تفعيل خطة المشروع السحابي."
+                    }
+                    else -> {
+                        "عذراً، تعذر الاتصال بـ Gemini السحابي: $raw\nيُرجى التحقق من اتصال الإنترنت وإعادة المحاولة."
+                    }
+                }
             }
-            getHelpfulLocalAnswer(question)
+            "عذراً، تعذر استلام رد من الذكاء الاصطناعي حالياً."
         }
     }
 
@@ -311,13 +291,6 @@ class GeminiAgentBrain {
             append("\n\nحدد الخطوة الذكية التالية لإنجاز كل أجزاء المهمة بالكامل كإنسان، ولا تختر DONE إلا بعد التأكد من اكتمال جميع الخطوات والمهام المجدولة.")
         }
 
-        if (isCloudProjectBillingBlocked) {
-            return BrainResult.Failure(
-                errorMessage = "الوضع المحلي الذكي نشط (الخدمة السحابية تتطلب تفعيل الفوترة للمشروع).",
-                isCloudUnavailable = true
-            )
-        }
-
         val payload = content {
             if (screenshot != null && !screenshot.isRecycled) {
                 image(screenshot)
@@ -326,11 +299,11 @@ class GeminiAgentBrain {
         }
 
         val firstAttempt = invokeModel(primaryModel, payload)
-        if (firstAttempt is BrainResult.Success || isCloudProjectBillingBlocked) {
+        if (firstAttempt is BrainResult.Success) {
             return firstAttempt
         }
 
-        // Try secondary lightweight model once if failure wasn't a project-wide billing block
+        // Try secondary lightweight model once if primary failed
         val secondAttempt = invokeModel(fallbackModel, payload)
         if (secondAttempt is BrainResult.Success) {
             return secondAttempt
@@ -385,25 +358,18 @@ class GeminiAgentBrain {
             throw e
         } catch (e: Exception) {
             val raw = e.localizedMessage ?: e.message ?: ""
+            Log.w(tag, "Gemini cloud reasoning unavailable ($raw); switching step to local Artemis engine.")
             val isBillingBlock = raw.contains("free tier is not available", ignoreCase = true) ||
-                raw.contains("billing", ignoreCase = true) ||
-                raw.contains("App Check", ignoreCase = true) ||
-                raw.contains("403")
-            if (isBillingBlock) {
-                isCloudProjectBillingBlocked = true
-                Log.w(tag, "Gemini cloud unavailable ($raw); switching session to local Artemis engine.")
-            } else {
-                Log.w(tag, "Gemini cloud reasoning unavailable ($raw); switching to local Artemis engine.")
-            }
+                raw.contains("billing", ignoreCase = true)
             val friendlyMsg = when {
                 isBillingBlock ->
-                    "الطبقة المجانية السحابية لـ Gemini غير مفعلة لهذا المشروع (تتطلب الفوترة) — تم التحويل للمحرك المحلي الذكي."
+                    "الطبقة السحابية لـ Gemini تتطلب تفعيل الفوترة لهذا المشروع — جاري المتابعة بالأتمتة المحلية."
                 raw.contains("403") || raw.contains("App Check", ignoreCase = true) ->
-                    "تعذر التحقق السحابي (App Check) — تم التحويل للمحرك المحلي الذكي."
+                    "تعذر التحقق السحابي (App Check) — جاري المتابعة بالأتمتة المحلية."
                 raw.contains("quota", ignoreCase = true) || raw.contains("429") ->
-                    "تم تجاوز حد الطلبات السحابي مؤقتاً — تم التحويل للمحرك المحلي الذكي."
+                    "تم تجاوز حد الطلبات السحابي مؤقتاً — جاري المتابعة بالأتمتة المحلية."
                 else ->
-                    "تعذر الاتصال السحابي بـ Gemini — تم التحويل للمحرك المحلي الذكي."
+                    "تعذر الاتصال السحابي بـ Gemini — جاري المتابعة بالأتمتة المحلية."
             }
             BrainResult.Failure(
                 errorMessage = friendlyMsg,
