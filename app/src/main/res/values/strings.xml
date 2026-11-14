@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">مورڤينت</string>
+    <string name="accessibility_service_label">مورڤينت - مساعد التحكم بالهاتف</string>
+    <string name="accessibility_service_description">تتيح خدمة مورڤينت تنفيذ الأوامر الذكية مثل الرجوع، الشاشة الرئيسية، فتح الإشعارات والتبديل بين التطبيقات بناءً على أوامر الشات.</string>
+</resources>

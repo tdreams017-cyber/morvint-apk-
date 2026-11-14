@@ -1,0 +1,289 @@
+package com.example.ui
+
+import android.app.Application
+import android.content.Intent
+import android.net.Uri
+import android.provider.Settings
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.model.ActionCardData
+import com.example.model.ActionType
+import com.example.model.ChatMessage
+import com.example.model.DeviceStatus
+import com.example.model.InstalledApp
+import com.example.model.MessageStatus
+import com.example.model.MorventMacro
+import com.example.nlp.AgentStatus
+import com.example.nlp.MorventAgentHub
+import com.example.service.MorventAccessibilityService
+import com.example.service.MorventFloatingAgentService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+enum class MorventTab {
+    CHAT,
+    CONTROL_HUB,
+    APPS,
+    SCENARIOS
+}
+
+class MorventViewModel(application: Application) : AndroidViewModel(application) {
+
+    private val agentHub = MorventAgentHub.getInstance(application)
+    val deviceController = agentHub.deviceController
+    val artemisEngine = agentHub.artemisEngine
+
+    val messages: StateFlow<List<ChatMessage>> = agentHub.messages
+    val isThinking: StateFlow<Boolean> = agentHub.isThinking
+    val isTtsEnabled: StateFlow<Boolean> = agentHub.isTtsEnabled
+    val agentStatus: StateFlow<AgentStatus> = artemisEngine.status
+    val isFloatingServiceRunning: StateFlow<Boolean> = MorventFloatingAgentService.runningFlow
+
+    private val _isHumanPaced = MutableStateFlow(artemisEngine.status.value.isHumanPaced)
+    val isHumanPaced: StateFlow<Boolean> = _isHumanPaced.asStateFlow()
+
+    private val _activeTab = MutableStateFlow(MorventTab.CHAT)
+    val activeTab: StateFlow<MorventTab> = _activeTab.asStateFlow()
+
+    private val _deviceStatus = MutableStateFlow(DeviceStatus())
+    val deviceStatus: StateFlow<DeviceStatus> = _deviceStatus.asStateFlow()
+
+    private val _installedApps = MutableStateFlow<List<InstalledApp>>(emptyList())
+    val installedApps: StateFlow<List<InstalledApp>> = _installedApps.asStateFlow()
+
+    val macros = listOf(
+        MorventMacro(
+            id = "sleep",
+            title = "وضع النوم والاسترخاء",
+            titleEn = "Sleep Mode",
+            description = "كتم الرنين والأصوات، إطفاء الكشاف، وضبط بيئة هادئة لتوفير الشحن.",
+            iconName = "bedtime",
+            commands = listOf("كتم الصوت", "إطفاء الكشاف", "فحص البطارية")
+        ),
+        MorventMacro(
+            id = "work",
+            title = "وضع الاجتماع والعمل",
+            titleEn = "Meeting Mode",
+            description = "تفعيل الاهتزاز، كتم أصوات الوسائط، ومنع الإزعاج الصوتي.",
+            iconName = "work",
+            commands = listOf("وضع الاهتزاز", "كتم وسائط الصوت")
+        ),
+        MorventMacro(
+            id = "power_save",
+            title = "بروتوكول توفير الطاقة الأقصى",
+            titleEn = "Ultra Power Save",
+            description = "إطفاء الفلاش، فحص استهلاك الطاقة، وخفض السطوع.",
+            iconName = "battery_saver",
+            commands = listOf("اطفي الكشاف", "فحص البطارية", "اعدادات الشاشة")
+        ),
+        MorventMacro(
+            id = "emergency",
+            title = "وضع الطوارئ الفوري",
+            titleEn = "Emergency Alert",
+            description = "تشغيل كشاف الفلاش بأقصى قوة، رفع الصوت لـ 100%، وتجهيز الاتصال.",
+            iconName = "warning",
+            commands = listOf("شغل الكشاف", "ارفع الصوت", "اتصال الطوارئ")
+        ),
+        MorventMacro(
+            id = "diagnostic",
+            title = "الفحص الشامل للهاتف",
+            titleEn = "Full Device Diagnostic",
+            description = "تحليل عميق للبطارية، التخزين، الذاكرة العشوائية RAM، والمستشعرات.",
+            iconName = "speed",
+            commands = listOf("فحص الهاتف", "حالة البطارية")
+        )
+    )
+
+    init {
+        viewModelScope.launch {
+            deviceController.isFlashlightOn.collect { on ->
+                _deviceStatus.update { it.copy(flashlightOn = on) }
+            }
+        }
+        viewModelScope.launch {
+            deviceController.lightSensorLux.collect { lux ->
+                _deviceStatus.update { it.copy(lightSensorLux = lux) }
+            }
+        }
+        viewModelScope.launch {
+            deviceController.accelZ.collect { z ->
+                _deviceStatus.update { it.copy(accelerometerZ = z) }
+            }
+        }
+
+        refreshDeviceStatus()
+        loadInstalledApps()
+    }
+
+    fun setTab(tab: MorventTab) {
+        _activeTab.value = tab
+    }
+
+    fun toggleTts() {
+        agentHub.setTtsEnabled(!isTtsEnabled.value)
+    }
+
+    fun refreshDeviceStatus() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val app = getApplication<Application>()
+            val battery = deviceController.getBatteryDetails()
+            val devInfo = deviceController.getDeviceInfo()
+            val vol = deviceController.getVolumeCardData()
+            val a11yActive = MorventAccessibilityService.isRunning ||
+                    MorventAccessibilityService.isServiceEnabled(app)
+
+            _deviceStatus.update {
+                it.copy(
+                    batteryLevel = battery.percentage,
+                    isCharging = battery.isCharging,
+                    batteryTemp = battery.temperatureCelsius,
+                    freeStorageGb = devInfo.freeStorageGb,
+                    totalStorageGb = devInfo.totalStorageGb,
+                    freeRamGb = devInfo.freeRamGb,
+                    totalRamGb = devInfo.totalRamGb,
+                    accessibilityServiceActive = a11yActive,
+                    mediaVolumePercent = if (vol.maxMediaVolume > 0) (vol.mediaVolume * 100 / vol.maxMediaVolume) else 50,
+                    brightnessPercent = deviceController.getScreenBrightnessPercent(),
+                    autoRotateEnabled = deviceController.isAutoRotateEnabled(),
+                    dndEnabled = deviceController.isDoNotDisturbEnabled(),
+                    powerSaveMode = deviceController.isPowerSaveMode(),
+                    canWriteSystemSettings = deviceController.canWriteSystemSettings(),
+                    canManageDnd = deviceController.canManageDoNotDisturb(),
+                    overlayPermissionGranted = Settings.canDrawOverlays(app)
+                )
+            }
+        }
+    }
+
+    fun loadInstalledApps() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val apps = deviceController.getInstalledApps()
+            _installedApps.value = apps
+        }
+    }
+
+    fun sendCommand(commandText: String) {
+        agentHub.submitCommand(commandText, sourceLabel = "الشات") { _, _ ->
+            refreshDeviceStatus()
+        }
+    }
+
+    fun toggleFlashlight() {
+        sendCommand("كشاف")
+    }
+
+    fun setVolume(percent: Int) {
+        deviceController.setMediaVolumePercent(percent)
+        _deviceStatus.update { it.copy(mediaVolumePercent = percent) }
+    }
+
+    fun setRingerMode(mode: Int) {
+        deviceController.setRingerMode(mode)
+        _deviceStatus.update { it.copy(ringerMode = mode) }
+    }
+
+    fun setBrightnessPercent(percent: Int) {
+        if (!deviceController.canWriteSystemSettings()) {
+            openWriteSettingsPermission()
+            return
+        }
+        val (ok, _) = deviceController.setScreenBrightnessPercent(percent)
+        if (ok) {
+            _deviceStatus.update { it.copy(brightnessPercent = percent.coerceIn(1, 100), canWriteSystemSettings = true) }
+        }
+    }
+
+    fun setAutoRotate(enabled: Boolean) {
+        if (!deviceController.canWriteSystemSettings()) {
+            openWriteSettingsPermission()
+            return
+        }
+        val (ok, _) = deviceController.setAutoRotate(enabled)
+        if (ok) {
+            _deviceStatus.update { it.copy(autoRotateEnabled = enabled, canWriteSystemSettings = true) }
+        }
+    }
+
+    fun setDoNotDisturb(enabled: Boolean) {
+        if (!deviceController.canManageDoNotDisturb()) {
+            openDndPermissionSettings()
+            return
+        }
+        val (ok, _) = deviceController.setDoNotDisturb(enabled)
+        if (ok) {
+            _deviceStatus.update { it.copy(dndEnabled = enabled, canManageDnd = true) }
+        }
+    }
+
+    fun openWriteSettingsPermission() {
+        deviceController.openWriteSettingsPermission()
+    }
+
+    fun openDndPermissionSettings() {
+        deviceController.openDndPermissionSettings()
+    }
+
+    fun openAccessibilitySettings() {
+        MorventAccessibilityService.openAccessibilitySettings(getApplication())
+    }
+
+    fun runMacro(macro: MorventMacro) {
+        sendCommand(macro.title)
+    }
+
+    fun launchApp(packageName: String, label: String) {
+        val (ok, msg) = deviceController.launchPackage(packageName, label)
+        val chatMsg = ChatMessage(
+            text = msg,
+            isUser = false,
+            status = if (ok) MessageStatus.SUCCESS else MessageStatus.ERROR,
+            actionType = ActionType.LAUNCH_APP,
+            cardData = ActionCardData.AppLaunchedCard(label, packageName)
+        )
+        agentHub.appendMessage(chatMsg)
+        if (isTtsEnabled.value) deviceController.speak(msg)
+    }
+
+    fun clearChat() {
+        agentHub.clearChat()
+    }
+
+    fun toggleFloatingService() {
+        val app = getApplication<Application>()
+        if (!Settings.canDrawOverlays(app)) {
+            openOverlayPermissionSettings()
+            return
+        }
+        if (MorventFloatingAgentService.isRunning) {
+            MorventFloatingAgentService.stop(app)
+        } else {
+            MorventFloatingAgentService.start(app)
+        }
+    }
+
+    fun openOverlayPermissionSettings() {
+        val app = getApplication<Application>()
+        val intent = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:${app.packageName}")
+        ).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        app.startActivity(intent)
+    }
+
+    fun toggleHumanPacing() {
+        val newVal = !_isHumanPaced.value
+        _isHumanPaced.value = newVal
+        artemisEngine.setPacing(newVal)
+    }
+
+    fun pauseAgent() = artemisEngine.pause()
+    fun resumeAgent() = artemisEngine.resume()
+    fun skipAgentStep() = artemisEngine.skipCurrentStep()
+    fun stopAgent() = artemisEngine.stop()
+}
