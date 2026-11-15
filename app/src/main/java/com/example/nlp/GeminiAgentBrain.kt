@@ -2,7 +2,11 @@ package com.example.nlp
 
 import android.graphics.Bitmap
 import android.util.Log
+import com.example.BuildConfig
 import com.example.service.RichScreenSnapshot
+import com.google.ai.client.generativeai.GenerativeModel as DirectGenerativeModel
+import com.google.ai.client.generativeai.type.generationConfig as directGenConfig
+import com.google.ai.client.generativeai.type.content as directContent
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
@@ -113,6 +117,58 @@ class GeminiAgentBrain {
             responseSchema = decisionSchema
             temperature = 0.2f
         }
+    }
+
+    private val useApiKey = BuildConfig.GEMINI_API_KEY.isNotBlank() && !BuildConfig.GEMINI_API_KEY.startsWith("AIzaSy...Placeholder")
+
+    private val directPrimaryModel by lazy {
+        if (useApiKey) {
+            runCatching {
+                DirectGenerativeModel(
+                    modelName = "gemini-1.5-flash",
+                    apiKey = BuildConfig.GEMINI_API_KEY,
+                    generationConfig = directGenConfig {
+                        responseMimeType = "application/json"
+                        temperature = 0.2f
+                    },
+                    systemInstruction = directContent {
+                        text(SYSTEM_PROMPT)
+                    }
+                )
+            }.getOrNull()
+        } else null
+    }
+
+    private val directFallbackModel by lazy {
+        if (useApiKey) {
+            runCatching {
+                DirectGenerativeModel(
+                    modelName = "gemini-1.5-flash",
+                    apiKey = BuildConfig.GEMINI_API_KEY,
+                    generationConfig = directGenConfig {
+                        responseMimeType = "application/json"
+                        temperature = 0.2f
+                    },
+                    systemInstruction = directContent {
+                        text(SYSTEM_PROMPT)
+                    }
+                )
+            }.getOrNull()
+        } else null
+    }
+
+    private val directChatModel by lazy {
+        if (useApiKey) {
+            runCatching {
+                DirectGenerativeModel(
+                    modelName = "gemini-1.5-flash",
+                    apiKey = BuildConfig.GEMINI_API_KEY,
+                    systemInstruction = directContent {
+                        text("أنت مساعد ذكاء اصطناعي عربي ذكي ومفيد جداً (مورڤينت). تجيب عن أي سؤال أو استفسار يطرحه المستخدم بدقة واحترافية ووضوح تام باللغة العربية.")
+                    }
+                )
+            }.getOrNull()
+        } else null
     }
 
     private val primaryModel by lazy {
@@ -227,42 +283,21 @@ class GeminiAgentBrain {
     }
 
     suspend fun answerGeneralChat(question: String): String {
-        val payload = content {
-            text(question)
-        }
-
-        // Query Gemini 3.8 Flash (Primary cloud model) directly for dynamic, intelligent AI responses
         return try {
-            val res = withTimeout(25_000L) {
-                chatModel.generateContent(payload)
+            val text = if (directChatModel != null) {
+                val res = withTimeout(25_000L) { directChatModel!!.generateContent(question) }
+                res.text?.trim()
+            } else {
+                val payload = content { text(question) }
+                val res = withTimeout(25_000L) { chatModel.generateContent(payload) }
+                res.text?.trim()
             }
-            val text = res.text?.trim()
             if (!text.isNullOrBlank()) {
                 return text
             }
-            // Fallback to Gemini 3.5 Flash Lite if empty
-            val fallbackRes = withTimeout(20_000L) {
-                chatFallbackModel.generateContent(payload)
-            }
-            fallbackRes.text?.trim() ?: getHelpfulConversationalFallback(question)
-        } catch (e: CancellationException) {
-            throw e
+            getHelpfulConversationalFallback(question)
         } catch (e: Exception) {
-            Log.w(tag, "Primary chatModel failed (${e.message}); attempting fallback model...")
-            try {
-                val fallbackRes = withTimeout(20_000L) {
-                    chatFallbackModel.generateContent(payload)
-                }
-                val fallbackText = fallbackRes.text?.trim()
-                if (!fallbackText.isNullOrBlank()) {
-                    return fallbackText
-                }
-            } catch (fallbackEx: CancellationException) {
-                throw fallbackEx
-            } catch (fallbackEx: Exception) {
-                Log.w(tag, "Fallback chatModel also encountered error (${fallbackEx.message}); using intelligent conversational fallback.")
-            }
-            // Provide a rich, helpful conversational answer if cloud is unreachable
+            Log.w(tag, "Chat generation failed: ${e.message}", e)
             getHelpfulConversationalFallback(question)
         }
     }
@@ -324,18 +359,78 @@ class GeminiAgentBrain {
             text(promptText)
         }
 
-        val firstAttempt = invokeModel(primaryModel, payload)
+        val firstAttempt = if (directPrimaryModel != null) {
+            invokeDirectModel(directPrimaryModel!!, screenshot, promptText)
+        } else {
+            invokeModel(primaryModel, payload)
+        }
         if (firstAttempt is BrainResult.Success) {
             return firstAttempt
         }
 
         // Try secondary lightweight model once if primary failed
-        val secondAttempt = invokeModel(fallbackModel, payload)
+        val secondAttempt = if (directFallbackModel != null) {
+            invokeDirectModel(directFallbackModel!!, screenshot, promptText)
+        } else {
+            invokeModel(fallbackModel, payload)
+        }
         if (secondAttempt is BrainResult.Success) {
             return secondAttempt
         }
 
         return firstAttempt
+    }
+
+    private suspend fun invokeDirectModel(
+        model: DirectGenerativeModel,
+        screenshot: Bitmap?,
+        promptText: String
+    ): BrainResult {
+        return try {
+            val response = withTimeout(35_000L) {
+                if (screenshot != null && !screenshot.isRecycled) {
+                    model.generateContent(
+                        directContent {
+                            image(screenshot)
+                            text(promptText)
+                        }
+                    )
+                } else {
+                    model.generateContent(promptText)
+                }
+            }
+            val jsonText = response.text?.trim()
+                ?: return BrainResult.Failure("لم يرد نموذج الذكاء الاصطناعي بقرار.", isCloudUnavailable = true)
+
+            val json = JSONObject(jsonText)
+            val actionStr = json.optString("action", "WAIT")
+            val actionKind = runCatching { AgentActionKind.valueOf(actionStr) }
+                .getOrDefault(AgentActionKind.WAIT)
+
+            val elementId = if (json.has("elementId") && !json.isNull("elementId")) {
+                json.optInt("elementId")
+            } else null
+
+            val decision = AgentDecision(
+                action = actionKind,
+                thought = json.optString("thought", "تحليل الشاشة..."),
+                statusLabel = json.optString("statusLabel", "جاري التنفيذ..."),
+                elementId = elementId,
+                x = json.optInt("x", 500).coerceIn(0, 1000),
+                y = json.optInt("y", 500).coerceIn(0, 1000),
+                endX = json.optInt("endX", 500).coerceIn(0, 1000),
+                endY = json.optInt("endY", 500).coerceIn(0, 1000),
+                text = json.optString("text", ""),
+                submitEnter = json.optBoolean("submitEnter", false),
+                target = json.optString("target", ""),
+                waitMs = json.optLong("waitMs", 1000L).coerceIn(300L, 4000L),
+                finalResponse = json.optString("finalResponse", "")
+            )
+            BrainResult.Success(decision)
+        } catch (e: Exception) {
+            Log.w(tag, "Direct model invocation failed: ${e.message}", e)
+            BrainResult.Failure("تعذر الاتصال بـ Gemini عبر مفتاح API.", isCloudUnavailable = true)
+        }
     }
 
     private suspend fun invokeModel(

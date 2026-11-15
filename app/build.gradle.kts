@@ -18,6 +18,7 @@ android {
     targetSdk = 36
     versionCode = 1
     versionName = "1.0"
+    buildConfigField("String", "GEMINI_API_KEY", "\"AIzaSyAOOIOm57sEu9tm5hnmegCXP3m2Z2aOI0M\"")
 
     testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
   }
@@ -108,6 +109,7 @@ dependencies {
   // implementation(libs.coil.compose)
   implementation(libs.converter.moshi)
   implementation(libs.firebase.ai)
+  implementation(libs.generative.ai)
   // Uncomment to use Firestore:
   // implementation(libs.firebase.firestore)
 
