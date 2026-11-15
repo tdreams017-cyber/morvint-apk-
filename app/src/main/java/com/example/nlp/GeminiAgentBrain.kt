@@ -227,17 +227,11 @@ class GeminiAgentBrain {
     }
 
     suspend fun answerGeneralChat(question: String): String {
-        // 1. Instant friendly local answer for greetings & execution queries
-        val quickResponse = getSmartLocalChatResponse(question)
-        if (quickResponse != null) {
-            return quickResponse
-        }
-
         val payload = content {
             text(question)
         }
 
-        // 2. Query Gemini 3.8 Flash (Primary cloud model)
+        // Query Gemini 3.8 Flash (Primary cloud model) directly for dynamic, intelligent AI responses
         return try {
             val res = withTimeout(25_000L) {
                 chatModel.generateContent(payload)
@@ -268,7 +262,7 @@ class GeminiAgentBrain {
             } catch (fallbackEx: Exception) {
                 Log.w(tag, "Fallback chatModel also encountered error (${fallbackEx.message}); using intelligent conversational fallback.")
             }
-            // Provide a rich, helpful conversational answer instead of throwing raw billing errors to the user
+            // Provide a rich, helpful conversational answer if cloud is unreachable
             getHelpfulConversationalFallback(question)
         }
     }
