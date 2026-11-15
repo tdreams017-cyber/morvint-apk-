@@ -79,6 +79,7 @@ fun MorventMainScreen(
     userDisplayName: String? = null,
     userEmail: String? = null,
     onSignOut: () -> Unit = {},
+    onRequestPhoneContactsPermissions: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val activeTab by viewModel.activeTab.collectAsState()
@@ -90,6 +91,9 @@ fun MorventMainScreen(
     val isFloatingRunning by viewModel.isFloatingServiceRunning.collectAsState()
     val isHumanPaced by viewModel.isHumanPaced.collectAsState()
     val agentStatus by viewModel.agentStatus.collectAsState()
+    val silentExecutionMode by viewModel.silentExecutionMode.collectAsState()
+    val autoReplyWhatsApp by viewModel.autoReplyWhatsApp.collectAsState()
+    val adbBridgeCommands = remember { viewModel.getAdbBridgeCommands() }
 
     val apiKey by viewModel.apiKey.collectAsState()
     val selectedModel by viewModel.selectedModel.collectAsState()
@@ -304,7 +308,8 @@ fun MorventMainScreen(
                     onOpenAccessibilitySettings = { viewModel.openAccessibilitySettings() },
                     onOpenOverlaySettings = { viewModel.openOverlayPermissionSettings() },
                     onOpenWriteSettings = { viewModel.openWriteSettingsPermission() },
-                    onOpenDndSettings = { viewModel.openDndPermissionSettings() }
+                    onOpenDndSettings = { viewModel.openDndPermissionSettings() },
+                    onOpenNotificationListenerSettings = { viewModel.openNotificationListenerSettings() }
                 )
                 MorventTab.CONTROL_HUB -> ControlHubScreen(
                     deviceStatus = deviceStatus,
@@ -323,7 +328,15 @@ fun MorventMainScreen(
                     onSetDoNotDisturb = { viewModel.setDoNotDisturb(it) },
                     onOpenWriteSettings = { viewModel.openWriteSettingsPermission() },
                     onOpenDndSettings = { viewModel.openDndPermissionSettings() },
-                    onOpenOverlaySettings = { viewModel.openOverlayPermissionSettings() }
+                    onOpenOverlaySettings = { viewModel.openOverlayPermissionSettings() },
+                    silentExecutionMode = silentExecutionMode,
+                    autoReplyWhatsApp = autoReplyWhatsApp,
+                    adbBridgeCommands = adbBridgeCommands,
+                    onToggleSilentExecution = { viewModel.toggleSilentExecution() },
+                    onToggleAutoReplyWhatsApp = { viewModel.toggleAutoReplyWhatsApp() },
+                    onOpenNotificationListenerSettings = { viewModel.openNotificationListenerSettings() },
+                    onOpenBatteryOptimizationSettings = { viewModel.openBatteryOptimizationSettings() },
+                    onRequestPhoneContactsPermissions = onRequestPhoneContactsPermissions
                 )
                 MorventTab.APPS -> AppsScreen(
                     installedApps = installedApps,

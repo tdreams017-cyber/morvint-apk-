@@ -2,13 +2,16 @@ package com.example.nlp
 
 import android.content.Context
 import android.provider.Settings
+import com.example.ai.ApiKeyManager
 import com.example.device.DeviceController
+import com.example.device.SystemBridgeManager
 import com.example.model.ActionCardData
 import com.example.model.ActionType
 import com.example.model.ChatMessage
 import com.example.model.MessageStatus
 import com.example.service.MorventAccessibilityService
 import com.example.service.MorventFloatingAgentService
+import com.example.service.MorventNotificationListenerService
 import kotlinx.coroutines.delay
 import java.util.Locale
 
@@ -59,8 +62,12 @@ class MorventCommandEngine(
         if (lower in listOf("افحص الشاشة", "محتوى الشاشة", "inspect screen", "scan screen")) return true
         if (containsAny(lower, "واي فاي", "وايفاي", "wifi", "بلوتوث", "bluetooth", "اعدادات", "الإعدادات", "settings") && wordCount <= 4) return true
         if ((lower.startsWith("افتح ") || lower.startsWith("شغل ") || lower.startsWith("open ")) && wordCount <= 3 && !containsAny(lower, "حساب", "موقع", "فيديو", "أغنية", "رسالة", "الكاميرا وصور")) return true
+        if (containsAny(lower, "تنفيذ صامت", "التنفيذ الصامت", "رد تلقائي", "الرد التلقائي", "جسر النظام", "صلاحيات adb") && wordCount <= 6) return true
+        if (containsAny(lower, "رد على المكالمة", "اجب المكالمة", "اقبل المكالمة", "اقفل المكالمة", "انهي المكالمة", "ارفض المكالمة", "السبيكر", "مكبر الصوت", "speakerphone") && wordCount <= 5) return true
+        if (containsAny(lower, "اقرأ رسائل واتساب", "اقرا رسائل واتساب", "رسائل واتساب", "اقرأ الواتساب", "اقرا الواتساب") && wordCount <= 6) return true
+        if ((lower.startsWith("رد على ") || lower.startsWith("احفظ ملاحظة") || lower.startsWith("عرض الملفات") || lower == "الملفات المحفوظة") && wordCount <= 10) return true
         if (containsAny(lower, "منبه", "alarm", "مؤقت", "timer") && Regex("\\d+").containsMatchIn(lower) && wordCount <= 6) return true
-        if (containsAny(lower, "اتصل", "call") && extractPhoneNumber(lower).isNotEmpty()) return true
+        if (containsAny(lower, "اتصل ب", "اتصل على", "رن على", "اتصل", "call") && wordCount <= 5) return true
 
         return false
     }
@@ -102,6 +109,84 @@ class MorventCommandEngine(
                     )
                 )
             }
+        }
+
+        // ========================================================
+        // 0A2. SILENT EXECUTION, AUTO-REPLY, ADB BRIDGE & MANAGED NOTES
+        // ========================================================
+        if (containsAny(lower, "التنفيذ الصامت", "تنفيذ صامت")) {
+            val disable = containsAny(lower, "إيقاف", "ايقاف", "عطل", "اوقف", "off", "disable")
+            val enabled = !disable
+            ApiKeyManager.getInstance(context).setSilentExecutionMode(enabled)
+            return ChatMessage(
+                text = if (enabled) {
+                    "تم تفعيل وضع **التنفيذ التلقائي الصامت (Silent Execution)** ⚡.\nسينفذ مورڤينت أوامرك فوراً بالخلفية وعبر جسر النظام دون أسئلة أو خطوات يدوية إضافية."
+                } else {
+                    "تم إيقاف وضع التنفيذ الصامت والعودة إلى الإيقاع التفاعلي القياسي."
+                },
+                isUser = false,
+                actionType = ActionType.MACRO_SCENARIO
+            )
+        }
+
+        if (containsAny(lower, "الرد التلقائي", "رد تلقائي")) {
+            val disable = containsAny(lower, "إيقاف", "ايقاف", "عطل", "اوقف", "off", "disable")
+            if (!disable && !MorventNotificationListenerService.isEnabled(context) && !MorventNotificationListenerService.isConnected.value) {
+                return ChatMessage(
+                    text = "لتفعيل الرد التلقائي على رسائل واتساب والتطبيقات في الخلفية، يرجى تفعيل صلاحية قراءة الإشعارات لمورڤينت 🔔.",
+                    isUser = false,
+                    status = MessageStatus.INFO,
+                    actionType = ActionType.WHATSAPP,
+                    actionDetail = "REQUEST_NOTIFICATION_LISTENER"
+                )
+            }
+            ApiKeyManager.getInstance(context).setAutoReplyWhatsApp(!disable)
+            return ChatMessage(
+                text = if (!disable) {
+                    "تم تفعيل **الرد التلقائي الذكي على واتساب والتطبيقات** بالخلفية 🤖💬.\nعند وصول أي رسالة قابلة للرد المباشر، سيصيغ مورڤينت رداً مناسباً ويرسله بصمت عبر Notification RemoteInput."
+                } else {
+                    "تم إيقاف الرد التلقائي على الرسائل الواردة."
+                },
+                isUser = false,
+                actionType = ActionType.WHATSAPP
+            )
+        }
+
+        if (containsAny(lower, "جسر النظام", "صلاحيات adb")) {
+            val bridge = SystemBridgeManager(context)
+            val caps = bridge.inspectCapabilities(controller)
+            val adbCmd = bridge.getAdbGrantCommand()
+            controller.copyToClipboard("Morvent ADB Bridge", adbCmd)
+            return ChatMessage(
+                text = "🔌 **حالة جسر التحكم المباشر بالنظام (${caps.activeCount}/${caps.totalCount} صلاحيات نشطة):**\n" +
+                    "• إمكانية الوصول (Accessibility): ${if (caps.accessibilityEnabled) "✓ مفعلة" else "✗ بحاجة لتفعيل"}\n" +
+                    "• قراءة والرد على الإشعارات: ${if (caps.notificationListenerEnabled) "✓ مفعلة" else "✗ بحاجة لتفعيل"}\n" +
+                    "• الاتصال وجهات الاتصال: ${if (caps.callPhoneGranted && caps.contactsGranted) "✓ مفعلة" else "✗ بحاجة لمنح"}\n" +
+                    "• استثناء البطارية للخلفية: ${if (caps.batteryOptimizationIgnored) "✓ مفعل" else "✗ بحاجة لمنح"}\n" +
+                    "• صلاحيات النواة العميقة (WRITE_SECURE_SETTINGS): ${if (caps.writeSecureSettingsGranted) "✓ ممنوحة" else "غير ممنوحة (تُمنح عبر ADB)"}\n\n" +
+                    "📋 تم نسخ أوامر التفعيل السريع عبر ADB إلى الحافظة:\n$adbCmd",
+                isUser = false,
+                actionType = ActionType.DIAGNOSTICS
+            )
+        }
+
+        if (lower.startsWith("احفظ ملاحظة") || lower.startsWith("اكتب ملاحظة")) {
+            val body = trimmed.replace(Regex("^(احفظ ملاحظة|اكتب ملاحظة)\\s*:?\\s*"), "").trim()
+            if (body.isNotEmpty()) {
+                val fname = "note_${System.currentTimeMillis() / 1000}"
+                val (ok, msg) = controller.saveNoteFile(fname, body)
+                return ChatMessage(msg, isUser = false, status = if (ok) MessageStatus.SUCCESS else MessageStatus.ERROR, actionType = ActionType.DEVICE_INFO)
+            }
+        }
+
+        if (containsAny(lower, "عرض الملفات", "الملفات المحفوظة")) {
+            val files = controller.listManagedFiles()
+            val text = if (files.isEmpty()) {
+                "لا توجد ملاحظات أو ملفات محفوظة في مجلد مستندات مورڤينت حتى الآن 📁."
+            } else {
+                "📁 **الملفات المحفوظة (${files.size}):**\n• " + files.joinToString("\n• ")
+            }
+            return ChatMessage(text, isUser = false, actionType = ActionType.DEVICE_INFO, subSteps = files)
         }
 
         // ========================================================
@@ -947,24 +1032,124 @@ class MorventCommandEngine(
         }
 
         // ========================================================
-        // 13. CALL & SMS & WHATSAPP
+        // 13. CALL & SMS & WHATSAPP & LIVE NOTIFICATIONS
         // ========================================================
+        if (containsAny(lower, "رد على المكالمة", "اجب المكالمة", "أجب المكالمة", "اقبل المكالمة", "answer call")) {
+            val telecomRes = controller.answerIncomingCall()
+            if (telecomRes.first) {
+                return ChatMessage(telecomRes.second, isUser = false, actionType = ActionType.PHONE_CALL)
+            }
+            val uiRes = MorventAccessibilityService.performAnswerCallViaUi()
+            if (uiRes.first) {
+                return ChatMessage(uiRes.second, isUser = false, actionType = ActionType.PHONE_CALL)
+            }
+            return if (!MorventAccessibilityService.isRunning) {
+                createAccessibilityDisabledMessage("الرد على المكالمة الواردة")
+            } else {
+                ChatMessage("لم يتم رصد مكالمة واردة نشطة حالياً أو زر رد ظاهر على الشاشة.", isUser = false, status = MessageStatus.INFO, actionType = ActionType.PHONE_CALL)
+            }
+        }
+
+        if (containsAny(lower, "اقفل المكالمة", "انهي المكالمة", "أنهي المكالمة", "ارفض المكالمة", "اغلق المكالمة", "end call", "hang up")) {
+            val telecomRes = controller.endActiveCall()
+            if (telecomRes.first) {
+                return ChatMessage(telecomRes.second, isUser = false, actionType = ActionType.PHONE_CALL)
+            }
+            val uiRes = MorventAccessibilityService.performEndCallViaUi()
+            if (uiRes.first) {
+                return ChatMessage(uiRes.second, isUser = false, actionType = ActionType.PHONE_CALL)
+            }
+            return if (!MorventAccessibilityService.isRunning) {
+                createAccessibilityDisabledMessage("إنهاء المكالمة")
+            } else {
+                ChatMessage("لا توجد مكالمة نشطة لإنهائها حالياً.", isUser = false, status = MessageStatus.INFO, actionType = ActionType.PHONE_CALL)
+            }
+        }
+
+        if (containsAny(lower, "السبيكر", "سبيكر", "مكبر الصوت", "speakerphone")) {
+            val enable = !containsAny(lower, "اطفئ", "طفي", "اغلق", "اوقف", "قفل", "off", "disable")
+            val (ok, msg) = controller.setSpeakerphone(enable)
+            return ChatMessage(msg, isUser = false, status = if (ok) MessageStatus.SUCCESS else MessageStatus.ERROR, actionType = ActionType.PHONE_CALL)
+        }
+
+        if (containsAny(lower, "اقرأ رسائل واتساب", "اقرا رسائل واتساب", "رسائل واتساب", "اقرأ الواتساب", "اقرا الواتساب")) {
+            val hasListener = MorventNotificationListenerService.isConnected.value || MorventNotificationListenerService.isEnabled(context)
+            val msgs = MorventNotificationListenerService.getMessagesForApp("whatsapp")
+            if (!hasListener && msgs.isEmpty()) {
+                return ChatMessage(
+                    text = "لقراءة رسائل واتساب والرد عليها بصمت في الخلفية، يرجى تفعيل صلاحية 'الوصول للإشعارات' لمورڤينت 🔔.",
+                    isUser = false,
+                    status = MessageStatus.INFO,
+                    actionType = ActionType.WHATSAPP,
+                    actionDetail = "REQUEST_NOTIFICATION_LISTENER"
+                )
+            }
+            return if (msgs.isEmpty()) {
+                ChatMessage("لا توجد رسائل واتساب واردة في شريط الإشعارات حالياً 💬.", isUser = false, actionType = ActionType.WHATSAPP)
+            } else {
+                val formatted = msgs.take(8).map { "من **${it.sender}**: ${it.text}" }
+                ChatMessage(
+                    text = "💬 **رسائل واتساب الواردة (${msgs.size}):**\n• " + formatted.joinToString("\n• "),
+                    isUser = false,
+                    actionType = ActionType.WHATSAPP,
+                    subSteps = formatted
+                )
+            }
+        }
+
+        if (lower.startsWith("رد على ")) {
+            val hasListener = MorventNotificationListenerService.isConnected.value || MorventNotificationListenerService.isEnabled(context)
+            if (!hasListener) {
+                return ChatMessage(
+                    text = "للرد الصامت في الخلفية على إشعارات التطبيقات دون فتحها، يرجى تفعيل صلاحية الوصول للإشعارات لمورڤينت 🔔.",
+                    isUser = false,
+                    status = MessageStatus.INFO,
+                    actionType = ActionType.WHATSAPP,
+                    actionDetail = "REQUEST_NOTIFICATION_LISTENER"
+                )
+            }
+            val afterPrefix = trimmed.removePrefix("رد على").trim()
+            val splitMatch = Regex("(?i)^(.*?)\\s+(?:بـ|ب|ان|أن|قائلا|:)\\s*(.+)$").find(afterPrefix)
+            val targetName = splitMatch?.groupValues?.getOrNull(1)?.trim() ?: afterPrefix.substringBefore(" ").trim()
+            val replyText = splitMatch?.groupValues?.getOrNull(2)?.trim().orEmpty().ifBlank {
+                afterPrefix.substringAfter(" ", "").trim()
+            }
+            val (ok, msg) = MorventNotificationListenerService.sendSilentReply(context, targetName, replyText)
+            return if (ok) {
+                ChatMessage(msg, isUser = false, actionType = ActionType.WHATSAPP)
+            } else {
+                val fallbackText = if (msg == "NO_ACTIVE_REMOTE_INPUT") {
+                    "لم يتم العثور على إشعار نشط يدعم الرد المباشر من '$targetName'. سأحاول فتح التطبيق أو الرد عند وصول رسالة جديدة."
+                } else msg
+                ChatMessage(fallbackText, isUser = false, status = MessageStatus.INFO, actionType = ActionType.WHATSAPP)
+            }
+        }
+
         if (containsAny(lower, "اتصل", "اتصال", "call", "رن على", "خابر")) {
             val phone = extractPhoneNumber(lower)
-            return if (phone.isNotEmpty()) {
-                val ok = controller.dialNumber(phone)
-                if (ok) ChatMessage("تم فتح واجهة الاتصال برقم $phone 📞.", isUser = false, actionType = ActionType.PHONE_CALL)
-                else ChatMessage("تعذر بدء الاتصال بالرقم.", isUser = false, status = MessageStatus.ERROR)
+            val contactTarget = if (phone.isNotEmpty()) {
+                phone
+            } else {
+                trimmed.replace(Regex("(?i)^(اتصل بـ|اتصل على|اتصل ب|اتصل|اتصال بـ|اتصال|رن على|خابر|call)\\s*"), "").trim()
+            }
+            return if (contactTarget.isNotEmpty()) {
+                val (ok, msg) = controller.placeDirectCall(contactTarget)
+                ChatMessage(
+                    text = msg,
+                    isUser = false,
+                    status = if (ok) MessageStatus.SUCCESS else MessageStatus.ERROR,
+                    actionType = ActionType.PHONE_CALL
+                )
             } else {
                 ChatMessage(
-                    text = "يرجى تحديد الرقم الذي ترغب بالاتصال به. مثال: 'اتصل بـ 0501234567'",
+                    text = "يرجى تحديد الاسم أو الرقم الذي ترغب بالاتصال به. مثال: 'اتصل بـ أحمد' أو 'اتصل بـ 0501234567'",
                     isUser = false,
                     actionType = ActionType.PHONE_CALL
                 )
             }
         }
 
-        if (containsAny(lower, "رسالة", "sms", "ابعت رسالة", "ارسل رسالة")) {
+        if (containsAny(lower, "رسالة", "sms", "ابعت رسالة", "ارسل رسالة") && !containsAny(lower, "واتساب", "واتس", "whatsapp")) {
             val phone = extractPhoneNumber(lower)
             val msgBody = extractMessageBody(trimmed)
             if (phone.isNotEmpty()) {
@@ -985,7 +1170,31 @@ class MorventCommandEngine(
 
         if (containsAny(lower, "واتساب", "whatsapp", "واتس")) {
             val phone = extractPhoneNumber(lower)
-            controller.openWhatsAppChat(if (phone.isNotEmpty()) phone else null, "مرحباً من مورڤينت")
+            val contactMatch = Regex("(?i)(?:لـ|الى|إلى)\\s+([^\\s]+(?:\\s+[^\\s]+)?)\\s+(?:في واتساب|على واتساب|بواتساب|واتساب)").find(trimmed)
+            val recipient = if (phone.isNotEmpty()) phone else contactMatch?.groupValues?.getOrNull(1)?.trim().orEmpty()
+            val bodyAfter = Regex("(?i)(?:واتساب|واتس|whatsapp)\\s*(?:بـ|:|نصها|محتواها)?\\s*(.+)$").find(trimmed)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+            val msgBody = if (bodyAfter.isNotBlank() && bodyAfter != trimmed) bodyAfter else extractMessageBody(trimmed)
+
+            // Attempt silent notification reply first if recipient has an active WhatsApp notification
+            if (recipient.isNotBlank() && bodyAfter.isNotBlank() &&
+                (MorventNotificationListenerService.isConnected.value || MorventNotificationListenerService.isEnabled(context))
+            ) {
+                val silentRes = MorventNotificationListenerService.sendSilentReply(context, recipient, msgBody)
+                if (silentRes.first) {
+                    return ChatMessage(silentRes.second, isUser = false, actionType = ActionType.WHATSAPP)
+                }
+            }
+
+            controller.openWhatsAppChat(if (recipient.isNotEmpty()) recipient else null, msgBody)
+            if (MorventAccessibilityService.isRunning && bodyAfter.isNotBlank()) {
+                delay(1200)
+                val (_, sendMsg) = MorventAccessibilityService.performWhatsAppSendStep(msgBody)
+                return ChatMessage(
+                    text = "تم فتح واتساب ومحاولة الإرسال المباشر: $sendMsg",
+                    isUser = false,
+                    actionType = ActionType.WHATSAPP
+                )
+            }
             return ChatMessage("تم فتح تطبيق واتساب لبدء المحادثة 💬.", isUser = false, actionType = ActionType.WHATSAPP)
         }
 

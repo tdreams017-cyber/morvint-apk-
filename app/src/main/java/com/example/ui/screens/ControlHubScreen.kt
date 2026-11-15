@@ -30,19 +30,25 @@ import androidx.compose.material.icons.filled.BatteryChargingFull
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.BrightnessHigh
 import androidx.compose.material.icons.filled.BrightnessMedium
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.ClearAll
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DoNotDisturbOn
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FlashlightOff
 import androidx.compose.material.icons.filled.FlashlightOn
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MarkChatRead
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.ScreenRotation
 import androidx.compose.material.icons.filled.Screenshot
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Splitscreen
 import androidx.compose.material.icons.filled.TouchApp
@@ -65,17 +71,24 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.model.DeviceStatus
+import com.example.ui.theme.MorventAmber
 import com.example.ui.theme.MorventCyan
 import com.example.ui.theme.MorventDarkBorder
 import com.example.ui.theme.MorventDarkSurface
@@ -103,9 +116,20 @@ fun ControlHubScreen(
     onOpenWriteSettings: () -> Unit = {},
     onOpenDndSettings: () -> Unit = {},
     onOpenOverlaySettings: () -> Unit = {},
+    silentExecutionMode: Boolean = true,
+    autoReplyWhatsApp: Boolean = false,
+    adbBridgeCommands: String = "",
+    onToggleSilentExecution: () -> Unit = {},
+    onToggleAutoReplyWhatsApp: () -> Unit = {},
+    onOpenNotificationListenerSettings: () -> Unit = {},
+    onOpenBatteryOptimizationSettings: () -> Unit = {},
+    onRequestPhoneContactsPermissions: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
+    val clipboardManager = LocalClipboardManager.current
+    var showAdbBridge by remember { mutableStateOf(false) }
+    var adbCopied by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -140,6 +164,269 @@ fun ControlHubScreen(
                     .background(MorventDarkSurfaceElevated)
             ) {
                 Icon(Icons.Default.Refresh, contentDescription = "تحديث", tint = MorventCyan)
+            }
+        }
+
+        // ========================================================
+        // Hardware-Level OS Bridge & Silent Permissions Card
+        // ========================================================
+        val activePerms = listOf(
+            deviceStatus.accessibilityServiceActive,
+            deviceStatus.notificationListenerActive,
+            deviceStatus.batteryOptimizationIgnored,
+            deviceStatus.overlayPermissionGranted,
+            deviceStatus.canWriteSystemSettings,
+            deviceStatus.canManageDnd,
+            deviceStatus.callPermissionsGranted && deviceStatus.contactsPermissionGranted,
+            deviceStatus.writeSecureSettingsGranted
+        ).count { it }
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, MorventEmerald.copy(alpha = 0.55f), RoundedCornerShape(20.dp)),
+            colors = CardDefaults.cardColors(containerColor = MorventDarkSurfaceElevated)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Box(
+                            modifier = Modifier
+                                .size(40.dp)
+                                .clip(CircleShape)
+                                .background(MorventEmerald.copy(alpha = 0.2f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Security, contentDescription = null, tint = MorventEmerald, modifier = Modifier.size(22.dp))
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "جسر التحكم الكامل بالهاتف (OS Bridge)",
+                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                color = Color.White
+                            )
+                            Text(
+                                text = "مفعّل $activePerms من 8 صلاحيات للتحكم الصامت والمستمر",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MorventEmerald,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    progress = { (activePerms / 8f).coerceIn(0f, 1f) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp)),
+                    color = MorventEmerald,
+                    trackColor = Color(0xFF1E2D47)
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Grid of 1-tap OS permission pills
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OsPermissionPill(
+                        label = "إمكانية الوصول",
+                        granted = deviceStatus.accessibilityServiceActive,
+                        onClick = onOpenAccessibilitySettings,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("bridge_accessibility_pill")
+                    )
+                    OsPermissionPill(
+                        label = "واتساب/إشعارات",
+                        granted = deviceStatus.notificationListenerActive,
+                        onClick = onOpenNotificationListenerSettings,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("bridge_notification_pill")
+                    )
+                    OsPermissionPill(
+                        label = "البطارية (خلفية)",
+                        granted = deviceStatus.batteryOptimizationIgnored,
+                        onClick = onOpenBatteryOptimizationSettings,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("bridge_battery_pill")
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OsPermissionPill(
+                        label = "مكالمات/أسماء",
+                        granted = deviceStatus.callPermissionsGranted && deviceStatus.contactsPermissionGranted,
+                        onClick = onRequestPhoneContactsPermissions,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("bridge_calls_contacts_pill")
+                    )
+                    OsPermissionPill(
+                        label = "فوق التطبيقات",
+                        granted = deviceStatus.overlayPermissionGranted,
+                        onClick = onOpenOverlaySettings,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OsPermissionPill(
+                        label = "النواة (ADB)",
+                        granted = deviceStatus.writeSecureSettingsGranted,
+                        onClick = { showAdbBridge = !showAdbBridge },
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Silent Execution Switch
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "التنفيذ التلقائي الصامت (Silent Execution)",
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
+                        Text(
+                            text = "تنفيذ فوري في الخلفية كالإنسان دون طلب تأكيدات أو خطوات يدوية",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.Gray,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = silentExecutionMode,
+                        onCheckedChange = { onToggleSilentExecution() },
+                        modifier = Modifier.testTag("silent_execution_switch"),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Black,
+                            checkedTrackColor = MorventEmerald,
+                            uncheckedThumbColor = Color.Gray,
+                            uncheckedTrackColor = Color(0xFF1E2B42)
+                        )
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Auto-Reply WhatsApp & Messaging Switch
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "الرد التلقائي الذكي على واتساب والرسائل",
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
+                        Text(
+                            text = "قراءة الرسائل الواردة والرد عليها بالخلفية بصمت عبر Gemini + RemoteInput",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.Gray,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = autoReplyWhatsApp,
+                        onCheckedChange = { onToggleAutoReplyWhatsApp() },
+                        modifier = Modifier.testTag("auto_reply_wa_switch"),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Black,
+                            checkedTrackColor = MorventCyan,
+                            uncheckedThumbColor = Color.Gray,
+                            uncheckedTrackColor = Color(0xFF1E2B42)
+                        )
+                    )
+                }
+
+                // Expandable ADB Bridge Panel
+                if (adbBridgeCommands.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF0E1728),
+                        border = androidx.compose.foundation.BorderStroke(0.5.dp, MorventAmber.copy(alpha = 0.4f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showAdbBridge = !showAdbBridge }
+                    ) {
+                        Column(modifier = Modifier.padding(10.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "⚡ أوامر جسر ADB لمنح كامل صلاحيات النواة بضغطة",
+                                    style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MorventAmber
+                                )
+                                Icon(
+                                    imageVector = if (showAdbBridge) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = "توسيع",
+                                    tint = MorventAmber,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            if (showAdbBridge) {
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Text(
+                                    text = adbBridgeCommands,
+                                    style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
+                                    color = Color(0xFFBAE6FD),
+                                    fontSize = 10.sp
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MorventAmber.copy(alpha = 0.2f),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            clipboardManager.setText(AnnotatedString(adbBridgeCommands))
+                                            adbCopied = true
+                                        }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.Center,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(Icons.Default.ContentCopy, contentDescription = null, tint = MorventAmber, modifier = Modifier.size(15.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = if (adbCopied) "تم نسخ أوامر ADB بنجاح ✓" else "نسخ أوامر التفعيل السريع (ADB)",
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = MorventAmber
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

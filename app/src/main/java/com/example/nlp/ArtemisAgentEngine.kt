@@ -2,8 +2,11 @@ package com.example.nlp
 
 import android.content.Context
 import android.util.Log
+import com.example.ai.ApiKeyManager
 import com.example.device.DeviceController
+import com.example.device.SystemBridgeManager
 import com.example.service.MorventAccessibilityService
+import com.example.service.MorventNotificationListenerService
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -71,10 +74,15 @@ class ArtemisAgentEngine(
     suspend fun answerGeneralChat(question: String, history: List<ChatTurn> = emptyList()): String =
         brain.answerGeneralChat(question, history)
 
+    suspend fun generateSmartAutoReply(sender: String, incomingText: String, fallback: String): String =
+        brain.generateSmartAutoReply(sender, incomingText, fallback)
+
     suspend fun testApiKeyConnection(apiKey: String, preferredModel: String): ApiConnectionTestResult =
         brain.testApiKeyConnection(apiKey, preferredModel)
 
     fun resetCloudAvailability() = brain.resetCloudAvailability()
+    private val keyManager by lazy { ApiKeyManager.getInstance(context) }
+    private val systemBridge by lazy { SystemBridgeManager(context) }
     private val tag = "ArtemisAgent"
     private val agentScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var executionJob: Job? = null
@@ -185,12 +193,17 @@ class ArtemisAgentEngine(
         steeringNotes.clear()
         appendedGoalsQueue.clear()
         val keepHumanPacing = _status.value.isHumanPaced
+        val silentMode = keyManager.silentExecutionMode.value
         val maxSteps = 300
 
         executionJob = agentScope.launch {
             val logs = mutableListOf<String>()
             val stepHistory = mutableListOf<String>()
-            val humanDelay = if (keepHumanPacing) 680L else 250L
+            val humanDelay = when {
+                silentMode -> 360L
+                keepHumanPacing -> 680L
+                else -> 250L
+            }
             var lastActionSignature = ""
             var repeatSignatureCount = 0
 
@@ -289,7 +302,8 @@ class ArtemisAgentEngine(
                             installedAppsSummary = appsSummary,
                             stepHistory = stepHistory,
                             stepNumber = stepNum,
-                            maxSteps = maxSteps
+                            maxSteps = maxSteps,
+                            silentExecutionMode = silentMode
                         )
                     } finally {
                         if (screenshot != null && !screenshot.isRecycled) {
@@ -624,7 +638,9 @@ class ArtemisAgentEngine(
             "SHARE_TEXT", "MEDIA_CONTROL", "OPEN_SETTINGS", "DEVICE_ACTION",
             "BRIGHTNESS_SET", "AUTO_ROTATE_SET", "DND_SET", "SCREEN_TIMEOUT_SET",
             "SYSTEM_PANEL", "STREAM_VOLUME",
-            "APP_DETAILS", "OPEN_MAPS", "OPEN_CAMERA", "OPEN_FILES", "SEND_EMAIL"
+            "APP_DETAILS", "OPEN_MAPS", "OPEN_CAMERA", "OPEN_FILES", "SEND_EMAIL",
+            "CALL_PLACE", "CALL_ANSWER", "CALL_END", "SPEAKER_SET",
+            "SILENT_REPLY", "READ_MESSAGES", "SAVE_NOTE", "ADB_SECURE_TOGGLE"
         )
     }
 
@@ -796,13 +812,101 @@ class ArtemisAgentEngine(
                 MorventAccessibilityService.performQuickSettingTileToggle(synonyms, collapseAfter = true)
             }
             lower == "read_notifications" -> {
-                val (ok, list) = MorventAccessibilityService.readSystemNotifications()
-                if (!ok) {
-                    Pair(false, "خدمة إمكانية الوصول غير مفعلة لقراءة إشعارات النظام")
-                } else if (list.isEmpty()) {
-                    Pair(true, "لا توجد إشعارات ظاهرة في شريط النظام حالياً 🔔")
+                val liveMsgs = MorventNotificationListenerService.getMessagesForApp(null)
+                if (liveMsgs.isNotEmpty()) {
+                    val lines = liveMsgs.take(15).map { "[${it.appLabel}] ${it.sender}: ${it.text}" }
+                    Pair(true, "🔔 أحدث الإشعارات والرسائل الحية (${lines.size}):\n• " + lines.joinToString("\n• "))
                 } else {
-                    Pair(true, "🔔 إشعارات النظام (${list.size}):\n• " + list.joinToString("\n• "))
+                    val (ok, list) = MorventAccessibilityService.readSystemNotifications()
+                    if (!ok) {
+                        Pair(false, "يرجى تفعيل 'خدمة قراءة الإشعارات' أو 'خدمة إمكانية الوصول' لقراءة إشعارات النظام")
+                    } else if (list.isEmpty()) {
+                        Pair(true, "لا توجد إشعارات ظاهرة في شريط النظام حالياً 🔔")
+                    } else {
+                        Pair(true, "🔔 إشعارات النظام (${list.size}):\n• " + list.joinToString("\n• "))
+                    }
+                }
+            }
+            lower == "read_whatsapp" -> {
+                val waMsgs = MorventNotificationListenerService.getMessagesForApp("واتساب")
+                if (waMsgs.isNotEmpty()) {
+                    val lines = waMsgs.take(12).map { "💬 ${it.sender}: ${it.text}" }
+                    Pair(true, "رسائل واتساب الواردة (${lines.size}):\n" + lines.joinToString("\n"))
+                } else if (MorventNotificationListenerService.isEnabled(context)) {
+                    Pair(true, "لا توجد رسائل واتساب واردة في شريط الإشعارات حالياً.")
+                } else {
+                    Pair(false, "لتقراءة رسائل واتساب بصمت في الخلفية، فعّل إذن 'الاستماع للإشعارات' من لوحة التحكم.")
+                }
+            }
+            lower.startsWith("reply_notification:") -> {
+                val payload = cmd.substringAfter("reply_notification:")
+                val recipient = payload.substringBefore(":").trim()
+                val body = payload.substringAfter(":", "").trim()
+                val replyRes = MorventNotificationListenerService.sendSilentReply(context, recipient, body)
+                if (replyRes.first) {
+                    replyRes
+                } else if (replyRes.second == "NO_ACTIVE_REMOTE_INPUT") {
+                    // Fallback to opening WhatsApp & sending via Accessibility if enabled
+                    executeDeviceControl("whatsapp_send:$recipient:$body")
+                } else {
+                    replyRes
+                }
+            }
+            lower.startsWith("whatsapp_send:") -> {
+                val payload = cmd.substringAfter("whatsapp_send:")
+                val recipient = payload.substringBefore(":").trim()
+                val body = payload.substringAfter(":", "").trim().ifBlank { "مرحباً" }
+                val silentFirst = MorventNotificationListenerService.sendSilentReply(context, recipient.ifBlank { "واتساب" }, body)
+                if (silentFirst.first) {
+                    silentFirst
+                } else {
+                    val opened = controller.openWhatsAppChat(recipient.ifBlank { null }, body)
+                    if (!opened) {
+                        Pair(false, "تعذر فتح واتساب لإرسال الرسالة إلى '$recipient'")
+                    } else if (MorventAccessibilityService.isRunning) {
+                        delay(1600)
+                        MorventAccessibilityService.performWhatsAppSendStep(body)
+                    } else {
+                        Pair(true, "تم فتح محادثة واتساب مع تجهيز الرسالة ('$body') 💬")
+                    }
+                }
+            }
+            lower.startsWith("call:") -> {
+                val target = cmd.substringAfter("call:").trim()
+                controller.placeDirectCall(target)
+            }
+            lower == "answer_call" -> {
+                val telecomRes = controller.answerIncomingCall()
+                if (telecomRes.first) telecomRes else MorventAccessibilityService.performAnswerCallViaUi()
+            }
+            lower == "end_call" -> {
+                val telecomRes = controller.endActiveCall()
+                if (telecomRes.first) telecomRes else MorventAccessibilityService.performEndCallViaUi()
+            }
+            lower == "speaker_on" -> {
+                val audioRes = controller.setSpeakerphone(true)
+                if (audioRes.first) audioRes else MorventAccessibilityService.performToggleSpeakerViaUi()
+            }
+            lower == "speaker_off" -> controller.setSpeakerphone(false)
+            lower.startsWith("adb_toggle:") -> {
+                val payload = cmd.substringAfter("adb_toggle:")
+                val key = payload.substringBefore(":").trim()
+                val stateStr = payload.substringAfter(":", "on").trim().lowercase(Locale.ROOT)
+                val enable = stateStr == "on" || stateStr == "true" || stateStr == "1"
+                systemBridge.applySecureSystemToggle(key, enable)
+            }
+            lower.startsWith("save_note:") -> {
+                val payload = cmd.substringAfter("save_note:")
+                val name = payload.substringBefore(":").trim()
+                val content = payload.substringAfter(":", "").trim()
+                controller.saveNoteFile(name, content)
+            }
+            lower == "list_files" -> {
+                val list = controller.listManagedFiles()
+                if (list.isEmpty()) {
+                    Pair(true, "لا توجد ملفات محفوظة في مجلد مستندات مورڤينت حالياً؛ جارٍ فتح مدير التنزيلات...")
+                } else {
+                    Pair(true, "📁 الملفات المحفوظة (${list.size}):\n• " + list.joinToString("\n• "))
                 }
             }
             lower == "clear_notifications" -> MorventAccessibilityService.clearAllSystemNotifications()
@@ -820,7 +924,7 @@ class ArtemisAgentEngine(
             }
             lower.startsWith("dial:") -> {
                 val num = cmd.substringAfter("dial:").trim()
-                Pair(controller.dialNumber(num), "فتح الاتصال بـ $num")
+                controller.placeDirectCall(num)
             }
             lower.startsWith("sms:") -> {
                 val payload = cmd.substringAfter("sms:")
@@ -1137,6 +1241,47 @@ class ArtemisAgentEngine(
                 .replace(to, "")
                 .trim()
             steps.add(AgentStep(stepId++, "تجهيز رسالة بريد إلكتروني عبر النظام", "SEND_EMAIL", "$to::$body"))
+            return steps
+        }
+
+        // 0E-B. Calls Management (Answer / End / Speaker / Direct Call)
+        if (lower.contains("رد على المكالمة") || lower.contains("اجب على المكالمة") || lower.contains("اقبل المكالمة") || lower == "رد على الاتصال") {
+            steps.add(AgentStep(stepId++, "الرد الفوري على المكالمة الواردة", "CALL_ANSWER", ""))
+            return steps
+        }
+        if (lower.contains("اقفل المكالمة") || lower.contains("انهي المكالمة") || lower.contains("أنهِ المكالمة") || lower.contains("ارفض المكالمة") || lower.contains("اغلق المكالمة")) {
+            steps.add(AgentStep(stepId++, "إنهاء أو رفض المكالمة فوراً", "CALL_END", ""))
+            return steps
+        }
+        if (lower.contains("سبيكر") || lower.contains("مكبر الصوت")) {
+            val disable = lower.contains("اطف") || lower.contains("أوقف") || lower.contains("اوقف") || lower.contains("اغلق")
+            steps.add(AgentStep(stepId++, if (disable) "إيقاف مكبر الصوت" else "تشغيل مكبر الصوت للمكالمة", "SPEAKER_SET", if (disable) "off" else "on"))
+            return steps
+        }
+        if (lower.startsWith("اتصل") || lower.startsWith("دق على") || lower.startsWith("خابر") || lower.startsWith("call ")) {
+            val target = clause.replace(Regex("(?i)^(اتصل بـ|اتصل على|اتصل|دق على|خابر|call)\\s*"), "").trim()
+            if (target.isNotEmpty()) {
+                steps.add(AgentStep(stepId++, "الاتصال الصوتي المباشر بـ '$target'", "CALL_PLACE", target))
+                return steps
+            }
+        }
+
+        // 0E-C. WhatsApp & Notification Silent Reply / Read
+        if ((lower.contains("اقرأ") || lower.contains("اقرا") || lower.contains("شوف") || lower.contains("اعرض")) &&
+            (lower.contains("واتساب") || lower.contains("واتس") || lower.contains("رسائل")) &&
+            !lower.contains("شاشة")
+        ) {
+            steps.add(AgentStep(stepId++, "قراءة رسائل واتساب والإشعارات الحية بصمت", "READ_MESSAGES", "واتساب"))
+            return steps
+        }
+        if (lower.startsWith("رد على ") || (lower.contains("واتساب") && (lower.contains("ابعت") || lower.contains("ارسل") || lower.contains("قوله") || lower.contains("رد")))) {
+            val parsedReply = extractRecipientAndMessage(clause)
+            steps.add(AgentStep(stepId++, "الرد الصامت على '${parsedReply.first}' برسالة '${parsedReply.second}'", "SILENT_REPLY", "${parsedReply.first}:${parsedReply.second}"))
+            return steps
+        }
+        if (lower.startsWith("احفظ ملاحظة ") || lower.startsWith("اكتب ملف ")) {
+            val content = clause.replace(Regex("^(احفظ ملاحظة|اكتب ملف)\\s+"), "").trim()
+            steps.add(AgentStep(stepId++, "حفظ الملاحظة في إدارة الملفات", "SAVE_NOTE", "morvent_note_${System.currentTimeMillis() % 10000}.txt:$content"))
             return steps
         }
 
@@ -1558,6 +1703,14 @@ class ArtemisAgentEngine(
             "OPEN_CAMERA" -> executeDeviceControl(if (step.target == "video") "camera_video" else "camera_photo")
             "OPEN_FILES" -> executeDeviceControl("files")
             "SEND_EMAIL" -> executeDeviceControl("email:${step.target}")
+            "CALL_PLACE" -> executeDeviceControl("call:${step.target}")
+            "CALL_ANSWER" -> executeDeviceControl("answer_call")
+            "CALL_END" -> executeDeviceControl("end_call")
+            "SPEAKER_SET" -> executeDeviceControl(if (step.target == "off") "speaker_off" else "speaker_on")
+            "SILENT_REPLY" -> executeDeviceControl("reply_notification:${step.target}")
+            "READ_MESSAGES" -> executeDeviceControl("read_whatsapp")
+            "SAVE_NOTE" -> executeDeviceControl("save_note:${step.target}")
+            "ADB_SECURE_TOGGLE" -> executeDeviceControl("adb_toggle:${step.target}")
             "STREAM_VOLUME" -> {
                 val streamKey = step.target.substringBefore(":")
                 val pct = step.target.substringAfter(":", "75").toIntOrNull() ?: 75
@@ -1642,6 +1795,26 @@ class ArtemisAgentEngine(
             }
             else -> Pair(true, "تم")
         }
+    }
+
+    private fun extractRecipientAndMessage(clause: String): Pair<String, String> {
+        val separators = listOf("محتواها", "وقوله", "وقل له", "رسالة", "نصها", "بـ:", "بـ ", "ب:", "قوله")
+        for (sep in separators) {
+            val idx = clause.indexOf(sep, ignoreCase = true)
+            if (idx != -1) {
+                val left = clause.substring(0, idx)
+                    .replace(Regex("(?i)^(رد على|ابعت لـ|ابعت ل|ارسل لـ|ارسل إلى|ارسل ل|راسل)\\s*"), "")
+                    .replace(Regex("(?i)(في واتساب|على واتساب|بالواتساب|واتساب|واتس)"), "")
+                    .trim()
+                val right = clause.substring(idx + sep.length).trim().removePrefix(":").trim()
+                if (right.isNotBlank()) return Pair(left.ifBlank { "واتساب" }, right)
+            }
+        }
+        val cleanRecipient = clause
+            .replace(Regex("(?i)^(رد على|ابعت لـ|ابعت ل|ارسل لـ|ارسل إلى|ارسل ل|راسل)\\s*"), "")
+            .replace(Regex("(?i)(في واتساب|على واتساب|بالواتساب|واتساب|واتس)"), "")
+            .trim()
+        return Pair(cleanRecipient.ifBlank { "واتساب" }, "مرحباً، تم التواصل معك عبر مورڤينت")
     }
 
     private fun extractTargetApp(text: String): String {

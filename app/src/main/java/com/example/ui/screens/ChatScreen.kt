@@ -96,6 +96,7 @@ fun ChatScreen(
     onOpenOverlaySettings: () -> Unit,
     onOpenWriteSettings: () -> Unit = {},
     onOpenDndSettings: () -> Unit = {},
+    onOpenNotificationListenerSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var inputText by remember { mutableStateOf("") }
@@ -116,6 +117,10 @@ fun ChatScreen(
     }
 
     val quickChips = listOf(
+        "💬 اقرأ رسائل واتساب",
+        "📞 رد على المكالمة",
+        "📵 اقفل المكالمة",
+        "🤖 تفعيل التنفيذ الصامت",
         "🚀 اشتغل في الخلفية",
         "🪟 تقسيم الشاشة",
         "🔔 اقرأ الإشعارات",
@@ -180,7 +185,8 @@ fun ChatScreen(
                     onOpenAccessibilitySettings = onOpenAccessibilitySettings,
                     onOpenOverlaySettings = onOpenOverlaySettings,
                     onOpenWriteSettings = onOpenWriteSettings,
-                    onOpenDndSettings = onOpenDndSettings
+                    onOpenDndSettings = onOpenDndSettings,
+                    onOpenNotificationListenerSettings = onOpenNotificationListenerSettings
                 )
             }
 
@@ -446,7 +452,8 @@ fun ChatBubble(
     onOpenAccessibilitySettings: () -> Unit,
     onOpenOverlaySettings: () -> Unit,
     onOpenWriteSettings: () -> Unit = {},
-    onOpenDndSettings: () -> Unit = {}
+    onOpenDndSettings: () -> Unit = {},
+    onOpenNotificationListenerSettings: () -> Unit = {}
 ) {
     val isUser = message.isUser
 
@@ -607,6 +614,35 @@ fun ChatBubble(
                                     text = "منح صلاحية وضع عدم الإزعاج بالنظام (DND)",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MorventEmerald,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    if (message.actionDetail == "REQUEST_NOTIFICATION_LISTENER") {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MorventCyan.copy(alpha = 0.2f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onOpenNotificationListenerSettings() }
+                                .padding(8.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.SmartToy,
+                                    contentDescription = null,
+                                    tint = MorventCyan,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "تفعيل قراءة رسائل واتساب والرد التلقائي بالخلفية",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MorventCyan,
                                     fontWeight = FontWeight.Bold
                                 )
                             }

@@ -9,6 +9,7 @@ import com.example.model.ActionType
 import com.example.model.ChatMessage
 import com.example.model.MessageStatus
 import com.example.service.MorventFloatingAgentService
+import com.example.service.MorventNotificationListenerService
 import com.google.firebase.Firebase
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.auth
@@ -67,6 +68,50 @@ class MorventAgentHub private constructor(context: Context) {
 
     private val _isTtsEnabled = MutableStateFlow(true)
     val isTtsEnabled: StateFlow<Boolean> = _isTtsEnabled.asStateFlow()
+
+    private val recentAutoReplyCooldown = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    init {
+        hubScope.launch(Dispatchers.IO) {
+            MorventNotificationListenerService.incomingEvents.collect { event ->
+                if (!apiKeyManager.autoReplyWhatsApp.value) return@collect
+                if (!event.canDirectReply) return@collect
+                val isMessagingApp = event.packageName.contains("whatsapp", ignoreCase = true) ||
+                    event.packageName.contains("telegram", ignoreCase = true) ||
+                    event.packageName.contains("messaging", ignoreCase = true)
+                if (!isMessagingApp) return@collect
+
+                val now = System.currentTimeMillis()
+                val key = "${event.packageName}:${event.sender}"
+                val last = recentAutoReplyCooldown[key] ?: 0L
+                if (now - last < 15_000L) return@collect
+                recentAutoReplyCooldown[key] = now
+
+                val replyText = artemisEngine.generateSmartAutoReply(
+                    sender = event.sender,
+                    incomingText = event.text,
+                    fallback = apiKeyManager.autoReplyTemplate.value
+                )
+                val (ok, msg) = MorventNotificationListenerService.sendSilentReply(
+                    context = appContext,
+                    recipientOrAppQuery = event.sender,
+                    replyText = replyText
+                )
+                if (ok) {
+                    launch(Dispatchers.Main) {
+                        appendMessage(
+                            ChatMessage(
+                                text = "🤖 **رد تلقائي صامت (${event.appLabel})**:\n$msg",
+                                isUser = false,
+                                actionType = ActionType.WHATSAPP,
+                                subSteps = listOf("الرسالة الواردة من ${event.sender}: ${event.text}", "الرد المرسل: $replyText")
+                            )
+                        )
+                    }
+                }
+            }
+        }
+    }
 
     fun setTtsEnabled(enabled: Boolean) {
         _isTtsEnabled.value = enabled
@@ -187,18 +232,29 @@ class MorventAgentHub private constructor(context: Context) {
             _isThinking.value = true
             _messages.update { it + ChatMessage(text = "جاري التفكير والصياغة...", isUser = false, status = MessageStatus.INFO) }
             hubScope.launch {
-                val answer = artemisEngine.answerGeneralChat(trimmed, recentHistory)
+                val rawAnswer = artemisEngine.answerGeneralChat(trimmed, recentHistory)
                 _isThinking.value = false
+
+                val goalRegex = Regex("\\[\\[EXECUTE_GOAL:\\s*(.+?)\\]\\]", RegexOption.DOT_MATCHES_ALL)
+                val goalMatch = goalRegex.find(rawAnswer)
+                val extractedGoal = goalMatch?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                val cleanAnswer = rawAnswer.replace(goalRegex, "").trim()
+                    .ifBlank { if (extractedGoal.isNotEmpty()) "حسناً، سأنفذ ذلك فوراً الآن 🤖..." else rawAnswer }
+
                 val replyMsg = ChatMessage(
-                    text = answer,
+                    text = cleanAnswer,
                     isUser = false,
-                    status = if (answer.startsWith("⚠️") || answer.startsWith("تعذر الوصول")) MessageStatus.ERROR else MessageStatus.SUCCESS,
+                    status = if (cleanAnswer.startsWith("⚠️") || cleanAnswer.startsWith("تعذر الوصول")) MessageStatus.ERROR else MessageStatus.SUCCESS,
                     actionType = ActionType.HELP
                 )
                 _messages.update { list -> list.dropLast(1) + replyMsg }
                 syncMessageToCloud(replyMsg)
-                speakIfEnabled(answer)
-                onResult?.invoke(true, answer)
+                speakIfEnabled(cleanAnswer)
+
+                if (extractedGoal.isNotEmpty()) {
+                    executeGoalFromAi(extractedGoal, "توجيه الذكاء الاصطناعي")
+                }
+                onResult?.invoke(true, cleanAnswer)
             }
             return
         }
@@ -356,6 +412,24 @@ class MorventAgentHub private constructor(context: Context) {
         }
     }
 
+    private fun executeGoalFromAi(goalText: String, sourceLabel: String) {
+        val cleanGoal = goalText.trim()
+        if (cleanGoal.isEmpty()) return
+        if (commandEngine.isFastDeterministicCommand(cleanGoal)) {
+            hubScope.launch {
+                val responseMsg = commandEngine.processCommand(cleanGoal)
+                if (responseMsg.actionDetail == "ROUTE_TO_ARTEMIS_AI") {
+                    startAutonomousGoal(cleanGoal, sourceLabel, null)
+                } else {
+                    appendMessage(responseMsg)
+                    speakIfEnabled(responseMsg.text)
+                }
+            }
+        } else {
+            startAutonomousGoal(cleanGoal, sourceLabel, null)
+        }
+    }
+
     private fun speakIfEnabled(text: String) {
         if (_isTtsEnabled.value && text.isNotBlank()) {
             deviceController.speak(text)
@@ -365,9 +439,12 @@ class MorventAgentHub private constructor(context: Context) {
     private fun isGeneralChatQuestion(text: String): Boolean {
         val lower = text.lowercase(Locale.ROOT)
         val automationVerbs = listOf(
-            "افتح", "شغل", "اضغط", "انقر", "اكتب", "فعّل", "عطل", "انزل", "ارفع",
+            "افتح", "شغل", "اضغط", "انقر", "اكتب", "فعّل", "فعل", "عطل", "انزل", "ارفع",
             "اخفض", "صور", "اتصل", "أتمتة", "نفذ", "مهمة", "ابحث عن", "سجل",
-            "سحب", "مرر", "اضبط", "امسح", "قفل", "تقسيم", "كشاف"
+            "سحب", "مرر", "اضبط", "امسح", "قفل", "تقسيم", "كشاف",
+            "رد على", "ابعت", "ارسل", "راسل", "دق", "كلم", "اقفل", "انهي", "أنهي",
+            "سبيكر", "احفظ", "ملاحظة", "واتساب", "واتس", "مكالمة", "تنفيذ صامت",
+            "رد تلقائي", "إشعار", "اشعار", "ملفات", "جسر"
         )
         val hasAutomationVerb = automationVerbs.any { lower.contains(it) }
         if (hasAutomationVerb) return false

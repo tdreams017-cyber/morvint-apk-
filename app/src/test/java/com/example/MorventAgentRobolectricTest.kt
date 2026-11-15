@@ -431,4 +431,75 @@ class MorventAgentRobolectricTest {
         assertEquals(defaultKey, manager.getEffectiveApiKey())
         manager.setSelectedModel(com.example.ai.ApiKeyManager.DEFAULT_MODEL)
     }
+
+    @Test
+    fun `systemBridge inspects capabilities, builds ADB grant script, and gates secure kernel writes`() {
+        val bridge = com.example.device.SystemBridgeManager(context)
+        val caps = bridge.inspectCapabilities(controller)
+        assertTrue(caps.totalCount >= 9)
+
+        val adbCmd = bridge.getAdbGrantCommand()
+        assertTrue(adbCmd.contains("WRITE_SECURE_SETTINGS"))
+        assertTrue(adbCmd.contains("enabled_accessibility_services"))
+        assertTrue(adbCmd.contains("allow_listener"))
+
+        val secureRes = bridge.applySecureSystemToggle("battery_saver", true)
+        assertFalse(secureRes.first)
+        assertEquals("NEED_WRITE_SECURE_SETTINGS", secureRes.second)
+    }
+
+    @Test
+    fun `commandEngine handles silent execution, note files, WhatsApp listener prompts, calls, and speakerphone`() = runBlocking {
+        val keyMgr = com.example.ai.ApiKeyManager.getInstance(context)
+        val silentOn = commandEngine.processCommand("تفعيل التنفيذ الصامت")
+        assertTrue(silentOn.text.contains("التنفيذ التلقائي الصامت"))
+        assertTrue(keyMgr.silentExecutionMode.value)
+
+        val waRead = commandEngine.processCommand("اقرأ رسائل واتساب")
+        assertEquals("REQUEST_NOTIFICATION_LISTENER", waRead.actionDetail)
+
+        val waReply = commandEngine.processCommand("رد على أحمد بـ سأتواصل معك قريباً")
+        assertEquals("REQUEST_NOTIFICATION_LISTENER", waReply.actionDetail)
+
+        val noteSave = commandEngine.processCommand("احفظ ملاحظة موعد الاجتماع الساعة 5")
+        assertTrue(noteSave.text.contains("تم حفظ الملف"))
+
+        val fileList = commandEngine.processCommand("عرض الملفات")
+        assertTrue(fileList.subSteps.isNotEmpty())
+
+        val bridgeReport = commandEngine.processCommand("جسر النظام")
+        assertEquals(ActionType.DIAGNOSTICS, bridgeReport.actionType)
+        assertTrue(bridgeReport.text.contains("adb shell"))
+
+        val speakerRes = commandEngine.processCommand("شغل السبيكر")
+        assertEquals(ActionType.PHONE_CALL, speakerRes.actionType)
+
+        val answerRes = commandEngine.processCommand("رد على المكالمة")
+        assertEquals("REQUEST_ACCESSIBILITY_PERMISSION", answerRes.actionDetail)
+
+        val endRes = commandEngine.processCommand("اقفل المكالمة")
+        assertEquals("REQUEST_ACCESSIBILITY_PERMISSION", endRes.actionDetail)
+    }
+
+    @Test
+    fun `planGoal decomposes hardware-level call, speaker, WhatsApp read, and silent reply steps`() {
+        val workflow = """
+            1. اقرأ رسائل واتساب
+            2. رد على خالد بـ تم استلام الرسالة
+            3. اتصل بـ 0501234567
+            4. شغل السبيكر
+            5. اقفل المكالمة
+            6. احفظ ملاحظة مكالمة خالد تمت
+        """.trimIndent()
+
+        val steps = artemisEngine.planGoal(workflow)
+        val types = steps.map { it.actionType }
+
+        assertTrue(types.contains("READ_MESSAGES"))
+        assertTrue(types.contains("SILENT_REPLY"))
+        assertTrue(types.contains("CALL_PLACE"))
+        assertTrue(types.contains("SPEAKER_SET"))
+        assertTrue(types.contains("CALL_END"))
+        assertTrue(types.contains("SAVE_NOTE"))
+    }
 }

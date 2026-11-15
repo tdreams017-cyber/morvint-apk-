@@ -74,6 +74,38 @@ class ApiKeyManager private constructor(context: Context) {
         return defaultKey
     }
 
+    private val _silentExecutionMode = MutableStateFlow(
+        prefs.getBoolean(KEY_SILENT_EXECUTION, true)
+    )
+    val silentExecutionMode: StateFlow<Boolean> = _silentExecutionMode.asStateFlow()
+
+    private val _autoReplyWhatsApp = MutableStateFlow(
+        prefs.getBoolean(KEY_AUTO_REPLY_WA, false)
+    )
+    val autoReplyWhatsApp: StateFlow<Boolean> = _autoReplyWhatsApp.asStateFlow()
+
+    private val _autoReplyTemplate = MutableStateFlow(
+        prefs.getString(KEY_AUTO_REPLY_TEMPLATE, DEFAULT_AUTO_REPLY_TEMPLATE)
+            ?: DEFAULT_AUTO_REPLY_TEMPLATE
+    )
+    val autoReplyTemplate: StateFlow<String> = _autoReplyTemplate.asStateFlow()
+
+    fun setSilentExecutionMode(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_SILENT_EXECUTION, enabled).apply()
+        _silentExecutionMode.value = enabled
+    }
+
+    fun setAutoReplyWhatsApp(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_AUTO_REPLY_WA, enabled).apply()
+        _autoReplyWhatsApp.value = enabled
+    }
+
+    fun setAutoReplyTemplate(template: String) {
+        val clean = template.trim().ifBlank { DEFAULT_AUTO_REPLY_TEMPLATE }
+        prefs.edit().putString(KEY_AUTO_REPLY_TEMPLATE, clean).apply()
+        _autoReplyTemplate.value = clean
+    }
+
     fun updateConnectionStatus(status: String) {
         _lastConnectionStatus.value = status
     }
@@ -87,6 +119,12 @@ class ApiKeyManager private constructor(context: Context) {
         private const val PREFS_NAME = "morvent_ai_prefs"
         private const val KEY_CUSTOM_API_KEY = "gemini_api_key"
         private const val KEY_SELECTED_MODEL = "gemini_selected_model"
+        private const val KEY_SILENT_EXECUTION = "morvent_silent_execution"
+        private const val KEY_AUTO_REPLY_WA = "morvent_auto_reply_wa"
+        private const val KEY_AUTO_REPLY_TEMPLATE = "morvent_auto_reply_template"
+
+        const val DEFAULT_AUTO_REPLY_TEMPLATE =
+            "مرحباً! أنا المساعد الذكي لمالك الهاتف. تم استلام رسالتك وسيتم الرد عليك في أقرب وقت."
 
         const val DEFAULT_MODEL = "gemini-3.5-flash-lite"
 

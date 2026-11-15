@@ -16,6 +16,7 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.Manifest
 import android.media.AudioManager
 import android.net.Uri
 import android.os.BatteryManager
@@ -26,15 +27,19 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.AlarmClock
+import android.provider.ContactsContract
 import android.provider.MediaStore
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
+import android.telecom.TelecomManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.example.model.ActionCardData
 import com.example.model.InstalledApp
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.io.File
 import java.util.Locale
 
 class DeviceController(private val context: Context) : SensorEventListener {
@@ -584,25 +589,148 @@ class DeviceController(private val context: Context) : SensorEventListener {
     }
 
     // ==========================================
-    // 6. COMMUNICATION (CALL / SMS / WHATSAPP)
+    // 6. COMMUNICATION (CALL / TELECOM / CONTACTS / SMS / WHATSAPP)
     // ==========================================
-    fun dialNumber(number: String): Boolean {
+    fun findContactPhoneNumber(nameQuery: String): Pair<String, String>? {
+        val clean = nameQuery.trim()
+        if (clean.isEmpty()) return null
+        val hasContacts = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.READ_CONTACTS
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasContacts) return null
+
         return try {
-            val uri = Uri.parse("tel:${Uri.encode(number)}")
-            val intent = Intent(Intent.ACTION_DIAL, uri).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            val projection = arrayOf(
+                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME,
+                ContactsContract.CommonDataKinds.Phone.NUMBER
+            )
+            context.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                projection,
+                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?",
+                arrayOf("%$clean%"),
+                null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val name = cursor.getString(0)?.trim().orEmpty()
+                    val num = cursor.getString(1)?.replace(Regex("[\\s\\-()]"), "")?.trim().orEmpty()
+                    if (num.isNotBlank()) return Pair(name.ifBlank { clean }, num)
+                }
             }
-            context.startActivity(intent)
-            vibratePulse(50)
-            true
+            null
         } catch (e: Exception) {
-            false
+            Log.w(tag, "Contact query failed", e)
+            null
         }
     }
 
-    fun composeSms(number: String, message: String): Boolean {
+    fun placeDirectCall(numberOrName: String): Pair<Boolean, String> {
+        val cleanInput = numberOrName.trim()
+        val resolved = if (cleanInput.any { it.isDigit() }) {
+            Pair(cleanInput, cleanInput.filter { it.isDigit() || it == '+' || it == '*' || it == '#' })
+        } else {
+            findContactPhoneNumber(cleanInput)
+                ?: return Pair(false, "لم يتم العثور على جهة اتصال باسم '$cleanInput' (أو تأكد من منح إذن جهات الاتصال).")
+        }
+
+        val (displayName, phoneNum) = resolved
+        if (phoneNum.isBlank()) return Pair(false, "رقم الهاتف غير صالح.")
+
+        val hasCallPerm = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CALL_PHONE
+        ) == PackageManager.PERMISSION_GRANTED
+
         return try {
-            val uri = Uri.parse("smsto:${Uri.encode(number)}")
+            val uri = Uri.parse("tel:${Uri.encode(phoneNum)}")
+            val intentAction = if (hasCallPerm) Intent.ACTION_CALL else Intent.ACTION_DIAL
+            val intent = Intent(intentAction, uri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            vibratePulse(60)
+            if (hasCallPerm) {
+                Pair(true, "تم بدء المكالمة الصوتية مباشرةً مع $displayName ($phoneNum) 📞✓")
+            } else {
+                Pair(true, "تم تجهيز الاتصال بـ $displayName ($phoneNum) في لوحة الاتصال (امنح إذن الهاتف للاتصال الفوري المباشر) 📞")
+            }
+        } catch (e: Exception) {
+            Pair(false, "تعذر بدء المكالمة: ${e.message}")
+        }
+    }
+
+    @Suppress("MissingPermission")
+    fun answerIncomingCall(): Pair<Boolean, String> {
+        val telecom = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+        val hasAnswerPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ANSWER_PHONE_CALLS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else false
+
+        if (telecom != null && hasAnswerPerm && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            try {
+                @Suppress("DEPRECATION")
+                telecom.acceptRingingCall()
+                vibratePulse(50)
+                return Pair(true, "تم الرد على المكالمة الواردة فوراً عبر نظام الهاتف 📞✓")
+            } catch (e: Exception) {
+                Log.w(tag, "TelecomManager acceptRingingCall failed, trying Accessibility UI", e)
+            }
+        }
+        return Pair(false, "FALLBACK_ACCESSIBILITY_CALL_ANSWER")
+    }
+
+    @Suppress("MissingPermission")
+    fun endActiveCall(): Pair<Boolean, String> {
+        val telecom = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+        val hasAnswerPerm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.ANSWER_PHONE_CALLS
+            ) == PackageManager.PERMISSION_GRANTED
+        } else false
+
+        if (telecom != null && hasAnswerPerm && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            try {
+                @Suppress("DEPRECATION")
+                val ended = telecom.endCall()
+                if (ended) {
+                    vibratePulse(50)
+                    return Pair(true, "تم إنهاء المكالمة فوراً 📵✓")
+                }
+            } catch (e: Exception) {
+                Log.w(tag, "TelecomManager endCall failed, trying Accessibility UI", e)
+            }
+        }
+        return Pair(false, "FALLBACK_ACCESSIBILITY_CALL_END")
+    }
+
+    fun setSpeakerphone(enabled: Boolean): Pair<Boolean, String> {
+        val am = audioManager ?: return Pair(false, "تعذر الوصول لنظام الصوت")
+        return try {
+            am.mode = AudioManager.MODE_IN_COMMUNICATION
+            @Suppress("DEPRECATION")
+            am.isSpeakerphoneOn = enabled
+            vibratePulse(35)
+            Pair(true, if (enabled) "تم تشغيل مكبر الصوت (السبيكر) للمكالمة 🔊✓" else "تم إيقاف مكبر الصوت 🔈✓")
+        } catch (e: Exception) {
+            Pair(false, "تعذر تبديل مكبر الصوت: ${e.message}")
+        }
+    }
+
+    fun dialNumber(number: String): Boolean = placeDirectCall(number).first
+
+    fun composeSms(numberOrName: String, message: String): Boolean {
+        val cleanNum = if (numberOrName.any { it.isDigit() }) {
+            numberOrName
+        } else {
+            findContactPhoneNumber(numberOrName)?.second ?: numberOrName
+        }
+        return try {
+            val uri = Uri.parse("smsto:${Uri.encode(cleanNum)}")
             val intent = Intent(Intent.ACTION_SENDTO, uri).apply {
                 putExtra("sms_body", message)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -615,9 +743,15 @@ class DeviceController(private val context: Context) : SensorEventListener {
         }
     }
 
-    fun openWhatsAppChat(phone: String?, message: String?): Boolean {
+    fun openWhatsAppChat(phoneOrName: String?, message: String?): Boolean {
+        val raw = phoneOrName?.trim().orEmpty()
+        val resolvedPhone = if (raw.isNotEmpty() && !raw.any { it.isDigit() }) {
+            findContactPhoneNumber(raw)?.second ?: ""
+        } else {
+            raw
+        }
         return try {
-            val cleanPhone = phone?.filter { it.isDigit() } ?: ""
+            val cleanPhone = resolvedPhone.filter { it.isDigit() }
             val encodedMsg = Uri.encode(message ?: "")
             val url = if (cleanPhone.isNotEmpty()) {
                 "https://api.whatsapp.com/send?phone=$cleanPhone&text=$encodedMsg"
@@ -853,6 +987,37 @@ class DeviceController(private val context: Context) : SensorEventListener {
             true
         } catch (_: Exception) {
             openSpecificSettings("storage")
+        }
+    }
+
+    fun listManagedFiles(): List<String> {
+        val dirs = listOfNotNull(
+            context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS),
+            context.filesDir
+        )
+        val entries = mutableListOf<String>()
+        for (dir in dirs) {
+            if (dir.exists()) {
+                dir.listFiles()?.sortedByDescending { it.lastModified() }?.take(15)?.forEach { f ->
+                    val kb = (f.length() / 1024L).coerceAtLeast(1L)
+                    entries.add("${f.name} ($kb KB)")
+                }
+            }
+        }
+        return entries
+    }
+
+    fun saveNoteFile(fileName: String, contentText: String): Pair<Boolean, String> {
+        return try {
+            val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOCUMENTS) ?: context.filesDir
+            if (!dir.exists()) dir.mkdirs()
+            val safeName = fileName.replace(Regex("[^a-zA-Z0-9\u0600-\u06FF._-]"), "_").ifBlank { "morvent_note.txt" }
+            val finalName = if (safeName.contains(".")) safeName else "$safeName.txt"
+            val target = File(dir, finalName)
+            target.writeText(contentText)
+            Pair(true, "تم حفظ الملف '$finalName' في مستندات التطبيق بنجاح 📁✓")
+        } catch (e: Exception) {
+            Pair(false, "تعذر حفظ الملف: ${e.message}")
         }
     }
 

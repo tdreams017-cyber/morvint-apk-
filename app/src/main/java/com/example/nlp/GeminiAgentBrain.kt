@@ -309,6 +309,30 @@ class GeminiAgentBrain(context: Context? = null) {
         }
     }
 
+    suspend fun generateSmartAutoReply(sender: String, incomingText: String, fallbackTemplate: String): String {
+        val apiKey = currentApiKey()
+        if (apiKey.isNotBlank()) {
+            val prompt = "وصلك الآن إشعار رسالة من \"$sender\" نصها:\n\"$incomingText\"\n" +
+                "اكتب رداً عربياً مختصراً ومهذباً نيابة عن مالك الهاتف (أقل من 18 كلمة)."
+            for (model in candidateModelsForApiKey()) {
+                val res = callDirectGeminiRest(
+                    apiKey = apiKey,
+                    modelName = model,
+                    systemInstruction = "أنت الرد التلقائي الذكي لمساعد مورڤينت. اكتب رداً طبيعياً قصيراً ومباشراً فقط بدون علامات اقتباس.",
+                    historyTurns = emptyList(),
+                    userPrompt = prompt,
+                    screenshot = null,
+                    expectJson = false
+                )
+                if (res.isSuccess && !res.text.isNullOrBlank()) {
+                    return res.text.trim()
+                }
+                if (res.httpCode == 400 || res.httpCode == 401 || res.httpCode == 403) break
+            }
+        }
+        return fallbackTemplate
+    }
+
     suspend fun decideNextAction(
         userGoal: String,
         steeringNotes: List<String>,
@@ -318,7 +342,8 @@ class GeminiAgentBrain(context: Context? = null) {
         installedAppsSummary: String,
         stepHistory: List<String>,
         stepNumber: Int,
-        maxSteps: Int
+        maxSteps: Int,
+        silentExecutionMode: Boolean = true
     ): BrainResult {
         val steeringSection = if (steeringNotes.isNotEmpty()) {
             "\nتوجيهات إضافية حية من المستخدم أثناء التنفيذ (أولوية قصوى):\n" +
@@ -345,8 +370,13 @@ class GeminiAgentBrain(context: Context? = null) {
             "(شجرة العناصر فارغة أو محجوبة — اعتمد على لقطة الشاشة والإحداثيات 0..1000 أو افتح التطبيق المطلوب)"
         }
 
+        val silentRuleSection = if (silentExecutionMode) {
+            "\nوضع التنفيذ الصامت الكامل مفعّل: لا تتوقف أبداً ولا تطلب من المستخدم تنفيذ أي خطوة يدوياً. نفذ عبر DEVICE_CONTROL أو Accessibility Actions مباشرة."
+        } else ""
+
         val promptText = buildString {
             append("الهدف المطلوب من المستخدم: \"$userGoal\"")
+            append(silentRuleSection)
             append(queuedSection)
             append(steeringSection)
             append("\nالخطوة الحالية: $stepNumber من $maxSteps")
@@ -618,16 +648,19 @@ class GeminiAgentBrain(context: Context? = null) {
 
     companion object {
         private const val CHAT_SYSTEM_PROMPT = """
-أنت "مورڤينت (Morvent)" — مساعد ذكاء اصطناعي عربي ذكي جداً ومتعدد القدرات، وفي نفس الوقت وكيل تحكم وأتمتة متكامل بهاتف أندرويد.
-قواعد الرد:
-1. تحدث بعربية طبيعية ذكية ودافئة وواضحة ومباشرة، وافهم سياق المحادثة السابقة وتجاوب مع كل ما يقوله المستخدم بدقة وذكاء (سواء تحية، نقاش عام، سؤال علمي/برمجي/ديني/يومي، تلخيص، ترجمة، أو كتابة محتوى).
-2. لا ترد أبداً بقوالب ثابتة أو إجابات مكررة لا علاقة لها بكلام المستخدم.
-3. إذا طلب المستخدم شرح ميزة أو تنفيذ شيء على الهاتف، اشرح كيف تستطيع تنفيذه أو اطلب منه كتابة الأمر التنفيذي مثل "افتح يوتيوب وشغل..." أو "اقرأ الإشعارات".
+أنت "مورڤينت (Morvent)" — مساعد ذكاء اصطناعي عربي ذكي جداً ومتصل مباشرة بنواة نظام أندرويد ووكيل أتمتة الهاتف (Artemis + Accessibility + Notification Bridge + Telecom).
+قواعد الرد والتنفيذ:
+1. تحدث بعربية طبيعية ذكية وواضحة، وافهم سياق المحادثة السابقة وتجاوب مع كل ما يقوله المستخدم بدقة.
+2. لا ترد أبداً بقوالب ثابتة، ولا تقل أبداً "لا يمكنني تنفيذ ذلك" على أوامر الهاتف الممكنة؛ بل إذا طلب المستخدم منك أي فعل على الهاتف (مثل: الرد على رسالة واتساب، قراءة رسائل أو إشعارات، إجراء مكالمة أو الرد عليها أو إنهائها، فتح تطبيق، النقر، الكتابة، تعديل الإعدادات/الصوت/السطوع، حفظ ملف)، أضف في آخر ردك سطراً مستقلاً بهذه الصيغة الحرفية فقط لتفعيل التنفيذ الفوري في الهاتف:
+[[EXECUTE_GOAL: وصف الأمر التنفيذي الكامل بالعربية]]
+مثال: إذا قال المستخدم "ممكن تبعت لأحمد على واتساب إني وصلت؟" أجب بجملة قصيرة ثم اكتب في سطر جديد:
+[[EXECUTE_GOAL: أرسل رسالة واتساب إلى أحمد محتواها إني وصلت]]
+3. أما الأسئلة المعرفية أو الدردشة العامة التي لا تطلب فعلاً على الهاتف فأجب عليها إجابة ذكية كاملة بدون وسم [[EXECUTE_GOAL]].
 """
 
         private const val SYSTEM_PROMPT = """
-أنت "مورڤينت (Morvent)" — وكيل أتمتة هاتف أندرويد متكامل بمستوى بشري مبني على منهجية Google Artemis.
-تعمل على النظام كله: تتحكم في واجهة النظام، الإعدادات السريعة، شريط الإشعارات، نوافذ الأذونات، الشاشة الرئيسية، وجميع التطبيقات المثبتة.
+أنت "مورڤينت (Morvent)" — وكيل أتمتة هاتف أندرويد متكامل الصلاحيات بمستوى بشري مبني على منهجية Google Artemis.
+تعمل بالخلفية بصمت وتلقائية تامة: تتحكم في واجهة النظام، الرد الصامت على الإشعارات وواتساب، المكالمات الصوتية، الإعدادات السريعة، الملفات، وجميع التطبيقات المثبتة.
 
 أجب دائماً بكائن JSON يحتوي على الحقول:
 - "action": أحد القيم: TAP_ELEMENT, TAP_COORDINATES, DOUBLE_TAP, LONG_PRESS_ELEMENT, LONG_PRESS_COORDINATES, TYPE_TEXT, SCROLL_DOWN, SCROLL_UP, SWIPE_LEFT, SWIPE_RIGHT, DRAG, PINCH_IN, PINCH_OUT, LAUNCH_APP, OPEN_URL, OPEN_SETTINGS, GLOBAL_ACTION, MEDIA_CONTROL, DEVICE_CONTROL, READ_SCREEN, WAIT, ASK_USER, DONE.
@@ -637,11 +670,13 @@ class GeminiAgentBrain(context: Context? = null) {
 - "x", "y": إحداثيات مطبعة 0..1000.
 - "text": النص عند TYPE_TEXT.
 - "submitEnter": true/false.
-- "target": اسم التطبيق أو الرابط أو إجراء النظام (back, home, recents, notifications, quick_settings, screenshot, lock, split_screen, all_apps).
+- "target": اسم التطبيق أو الرابط أو إجراء النظام (back, home, recents, notifications, quick_settings, screenshot, lock, split_screen, all_apps) أو أوامر DEVICE_CONTROL مثل:
+  call:<الرقم أو الاسم>, answer_call, end_call, speaker_on, speaker_off, reply_notification:<المستلم أو التطبيق>:<الرسالة>, read_notifications, read_whatsapp, whatsapp_send:<المستلم>:<الرسالة>, adb_toggle:<key>:<on/off>, save_note:<اسم الملف>:<المحتوى>, brightness:<up/down/auto/0..100>, dnd_on, dnd_off, mute, vibrate, normal, flashlight_on, flashlight_off, volume_up, volume_down, qs_toggle:<title>, permission_allow, permission_deny, files.
 - "waitMs": 500..4000 عند WAIT.
 - "finalResponse": الملخص النهائي للمستخدم عند DONE أو READ_SCREEN أو ASK_USER.
 
-لا تختر DONE إلا بعد اكتمال جميع خطوات المهمة.
+قواعد التنفيذ الصامت:
+- لا تستخدم ASK_USER إطلاقاً إلا لخطوة حساسة جداً مثل كلمة مرور أو رمز تحقق OTP أو دفع مالي. فيما عدا ذلك نفذ الخطوات بنفسك كالإنسان حتى تكتمل المهمة ثم أرجع DONE.
 """
     }
 }

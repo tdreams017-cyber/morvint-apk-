@@ -116,7 +116,21 @@ class MainActivity : ComponentActivity() {
 
                         val permissionsLauncher = rememberLauncherForActivityResult(
                             contract = ActivityResultContracts.RequestMultiplePermissions()
-                        ) { _ -> }
+                        ) { _ ->
+                            viewModel.refreshDeviceStatus()
+                        }
+
+                        val requestPhoneContacts: () -> Unit = {
+                            val callPerms = mutableListOf(
+                                Manifest.permission.CALL_PHONE,
+                                Manifest.permission.READ_PHONE_STATE,
+                                Manifest.permission.READ_CONTACTS
+                            )
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                callPerms.add(Manifest.permission.ANSWER_PHONE_CALLS)
+                            }
+                            permissionsLauncher.launch(callPerms.toTypedArray())
+                        }
 
                         LaunchedEffect(Unit) {
                             val permissionsNeeded = mutableListOf<String>()
@@ -130,6 +144,27 @@ class MainActivity : ComponentActivity() {
                                 != PackageManager.PERMISSION_GRANTED
                             ) {
                                 permissionsNeeded.add(Manifest.permission.POST_NOTIFICATIONS)
+                            }
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.CALL_PHONE)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                permissionsNeeded.add(Manifest.permission.CALL_PHONE)
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                                ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ANSWER_PHONE_CALLS)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                permissionsNeeded.add(Manifest.permission.ANSWER_PHONE_CALLS)
+                            }
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_PHONE_STATE)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                permissionsNeeded.add(Manifest.permission.READ_PHONE_STATE)
+                            }
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CONTACTS)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                permissionsNeeded.add(Manifest.permission.READ_CONTACTS)
                             }
                             if (permissionsNeeded.isNotEmpty()) {
                                 permissionsLauncher.launch(permissionsNeeded.toTypedArray())
@@ -166,6 +201,7 @@ class MainActivity : ComponentActivity() {
                                     GoogleAuthManager.signOut(this@MainActivity, auth)
                                 }
                             },
+                            onRequestPhoneContactsPermissions = requestPhoneContacts,
                             modifier = Modifier.fillMaxSize()
                         )
                     }

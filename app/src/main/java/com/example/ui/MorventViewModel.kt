@@ -8,6 +8,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.cloud.CloudTaskRecord
 import com.example.cloud.MorventCloudRepository
+import com.example.device.AgentBridgeCapabilities
+import com.example.device.SystemBridgeManager
 import com.example.model.ActionCardData
 import com.example.model.ActionType
 import com.example.model.ChatMessage
@@ -18,8 +20,10 @@ import com.example.model.MorventMacro
 import com.example.nlp.AgentStatus
 import com.example.nlp.ApiConnectionTestResult
 import com.example.nlp.MorventAgentHub
+import com.example.service.CapturedNotificationMessage
 import com.example.service.MorventAccessibilityService
 import com.example.service.MorventFloatingAgentService
+import com.example.service.MorventNotificationListenerService
 import com.google.firebase.Firebase
 import com.google.firebase.FirebaseApp
 import com.google.firebase.auth.auth
@@ -42,6 +46,7 @@ enum class MorventTab {
 class MorventViewModel(application: Application) : AndroidViewModel(application) {
 
     private val agentHub = MorventAgentHub.getInstance(application)
+    private val systemBridge = SystemBridgeManager(application)
     val apiKeyManager = agentHub.apiKeyManager
     val deviceController = agentHub.deviceController
     val artemisEngine = agentHub.artemisEngine
@@ -52,9 +57,16 @@ class MorventViewModel(application: Application) : AndroidViewModel(application)
     val agentStatus: StateFlow<AgentStatus> = artemisEngine.status
     val isFloatingServiceRunning: StateFlow<Boolean> = MorventFloatingAgentService.runningFlow
 
+    val silentExecutionMode: StateFlow<Boolean> = apiKeyManager.silentExecutionMode
+    val autoReplyWhatsApp: StateFlow<Boolean> = apiKeyManager.autoReplyWhatsApp
+    val liveMessages: StateFlow<List<CapturedNotificationMessage>> = MorventNotificationListenerService.recentMessages
+
     val apiKey: StateFlow<String> = apiKeyManager.apiKey
     val selectedModel: StateFlow<String> = apiKeyManager.selectedModel
     val connectionStatus: StateFlow<String> = apiKeyManager.lastConnectionStatus
+
+    private val _bridgeCapabilities = MutableStateFlow(AgentBridgeCapabilities())
+    val bridgeCapabilities: StateFlow<AgentBridgeCapabilities> = _bridgeCapabilities.asStateFlow()
 
     private val _isTestingConnection = MutableStateFlow(false)
     val isTestingConnection: StateFlow<Boolean> = _isTestingConnection.asStateFlow()
@@ -221,12 +233,11 @@ class MorventViewModel(application: Application) : AndroidViewModel(application)
 
     fun refreshDeviceStatus() {
         viewModelScope.launch(Dispatchers.IO) {
-            val app = getApplication<Application>()
             val battery = deviceController.getBatteryDetails()
             val devInfo = deviceController.getDeviceInfo()
             val vol = deviceController.getVolumeCardData()
-            val a11yActive = MorventAccessibilityService.isRunning ||
-                    MorventAccessibilityService.isServiceEnabled(app)
+            val caps = systemBridge.inspectCapabilities(deviceController)
+            _bridgeCapabilities.value = caps
 
             _deviceStatus.update {
                 it.copy(
@@ -237,15 +248,20 @@ class MorventViewModel(application: Application) : AndroidViewModel(application)
                     totalStorageGb = devInfo.totalStorageGb,
                     freeRamGb = devInfo.freeRamGb,
                     totalRamGb = devInfo.totalRamGb,
-                    accessibilityServiceActive = a11yActive,
+                    accessibilityServiceActive = caps.accessibilityEnabled,
+                    notificationListenerActive = caps.notificationListenerEnabled,
+                    callPermissionsGranted = caps.callPhoneGranted && caps.answerCallsGranted,
+                    contactsPermissionGranted = caps.contactsGranted,
+                    batteryOptimizationIgnored = caps.batteryOptimizationIgnored,
+                    writeSecureSettingsGranted = caps.writeSecureSettingsGranted,
                     mediaVolumePercent = if (vol.maxMediaVolume > 0) (vol.mediaVolume * 100 / vol.maxMediaVolume) else 50,
                     brightnessPercent = deviceController.getScreenBrightnessPercent(),
                     autoRotateEnabled = deviceController.isAutoRotateEnabled(),
                     dndEnabled = deviceController.isDoNotDisturbEnabled(),
                     powerSaveMode = deviceController.isPowerSaveMode(),
-                    canWriteSystemSettings = deviceController.canWriteSystemSettings(),
-                    canManageDnd = deviceController.canManageDoNotDisturb(),
-                    overlayPermissionGranted = Settings.canDrawOverlays(app)
+                    canWriteSystemSettings = caps.writeSettingsGranted,
+                    canManageDnd = caps.dndPolicyGranted,
+                    overlayPermissionGranted = caps.overlayGranted
                 )
             }
         }
@@ -321,6 +337,31 @@ class MorventViewModel(application: Application) : AndroidViewModel(application)
 
     fun openAccessibilitySettings() {
         MorventAccessibilityService.openAccessibilitySettings(getApplication())
+    }
+
+    fun openNotificationListenerSettings() {
+        MorventNotificationListenerService.openSettings(getApplication())
+    }
+
+    fun openBatteryOptimizationSettings() {
+        systemBridge.openBatteryOptimizationExemption()
+    }
+
+    fun getAdbBridgeCommands(): String = systemBridge.getAdbGrantCommand()
+
+    fun toggleSilentExecution() {
+        apiKeyManager.setSilentExecutionMode(!silentExecutionMode.value)
+    }
+
+    fun toggleAutoReplyWhatsApp() {
+        val next = !autoReplyWhatsApp.value
+        if (next && !MorventNotificationListenerService.isEnabled(getApplication()) &&
+            !MorventNotificationListenerService.isConnected.value
+        ) {
+            openNotificationListenerSettings()
+            return
+        }
+        apiKeyManager.setAutoReplyWhatsApp(next)
     }
 
     fun runMacro(macro: MorventMacro) {

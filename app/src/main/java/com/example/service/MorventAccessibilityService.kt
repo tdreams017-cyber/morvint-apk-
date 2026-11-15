@@ -1176,5 +1176,62 @@ class MorventAccessibilityService : AccessibilityService() {
             logs.add("تم إرسال إشارة فتح الحساب والمصادقة للنظام")
             return Pair(true, logs)
         }
+
+        // ========================================================
+        // 8. CALL & WHATSAPP BACKGROUND UI AUTOMATION
+        // ========================================================
+        fun performAnswerCallViaUi(): Pair<Boolean, String> {
+            if (serviceRef?.get() == null) {
+                return Pair(false, "خدمة إمكانية الوصول غير مفعلة للرد التلقائي على المكالمة")
+            }
+            val answerKeywords = listOf("رد", "قبول", "إجابة", "اجابة", "Answer", "Accept", "Pickup")
+            for (kw in answerKeywords) {
+                val res = clickElementByText(kw)
+                if (res.first) return Pair(true, "تم الرد على المكالمة تلقائياً عبر واجهة النظام ($kw) 📞✓")
+            }
+            return Pair(false, "لم يظهر زر الرد على المكالمة على الشاشة حالياً")
+        }
+
+        fun performEndCallViaUi(): Pair<Boolean, String> {
+            if (serviceRef?.get() == null) {
+                return Pair(false, "خدمة إمكانية الوصول غير مفعلة لإنهاء المكالمة")
+            }
+            val endKeywords = listOf("إنهاء", "انهاء", "رفض", "إغلاق", "End call", "End", "Decline", "Hang up", "Reject")
+            for (kw in endKeywords) {
+                val res = clickElementByText(kw)
+                if (res.first) return Pair(true, "تم إنهاء المكالمة تلقائياً ($kw) 📵✓")
+            }
+            return Pair(false, "لم يتم العثور على زر إنهاء المكالمة على الشاشة الحالية")
+        }
+
+        fun performToggleSpeakerViaUi(): Pair<Boolean, String> {
+            if (serviceRef?.get() == null) {
+                return Pair(false, "خدمة إمكانية الوصول غير مفعلة")
+            }
+            val speakerKeywords = listOf("مكبر الصوت", "السبيكر", "سبيكر", "Speaker", "Loudspeaker")
+            for (kw in speakerKeywords) {
+                val res = clickElementByText(kw)
+                if (res.first) return Pair(true, "تم تبديل مكبر الصوت ($kw) 🔊✓")
+            }
+            return Pair(false, "لم يتم العثور على زر مكبر الصوت على الشاشة")
+        }
+
+        suspend fun performWhatsAppSendStep(messageText: String): Pair<Boolean, String> {
+            if (serviceRef?.get() == null) {
+                return Pair(false, "خدمة إمكانية الوصول غير مفعلة لإكمال الإرسال داخل واتساب")
+            }
+            val typed = typeTextIntoField(null, messageText)
+            if (!typed.first) {
+                delay(400)
+            }
+            val sendKeywords = listOf("إرسال", "ارسال", "Send")
+            for (kw in sendKeywords) {
+                val clicked = clickElementByText(kw)
+                if (clicked.first) {
+                    return Pair(true, "تم كتابة الرسالة والنقر على إرسال داخل واتساب بنجاح 💬✓")
+                }
+            }
+            return Pair(false, "تم فتح المحادثة، ولكن تعذر العثور على زر الإرسال تلقائياً")
+        }
     }
 }
