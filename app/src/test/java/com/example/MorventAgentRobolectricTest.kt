@@ -397,7 +397,7 @@ class MorventAgentRobolectricTest {
 
     @Test
     fun `chat responses handle greetings and questions smoothly without AppCheck errors`() = runBlocking {
-        val brain = com.example.nlp.GeminiAgentBrain()
+        val brain = com.example.nlp.GeminiAgentBrain(context)
         val salamResponse = brain.getSmartLocalChatResponse("السلام عليكم")
         assertTrue(salamResponse != null && salamResponse.contains("وعليكم السلام ورحمة الله وبركاته"))
 
@@ -407,8 +407,28 @@ class MorventAgentRobolectricTest {
         val whoResponse = brain.getSmartLocalChatResponse("من أنت")
         assertTrue(whoResponse != null && whoResponse.contains("مورڤينت"))
 
-        // Even with network/AppCheck unavailable, answerGeneralChat returns a helpful response without throwing error
+        // Even with network/AppCheck unavailable, answerGeneralChat returns a non-blank response without throwing
         val answer = brain.answerGeneralChat("السلام عليكم")
         assertTrue(answer.isNotBlank())
+    }
+
+    @Test
+    fun `apiKeyManager stores, updates, selects model, and resets keys cleanly`() {
+        val manager = com.example.ai.ApiKeyManager.getInstance(context)
+        val defaultKey = manager.resetToDefaultKey()
+        assertTrue(defaultKey.isNotBlank())
+
+        manager.saveApiKey("AIzaSyCustomTestKey12345")
+        assertEquals("AIzaSyCustomTestKey12345", manager.getEffectiveApiKey())
+
+        manager.setSelectedModel("gemini-flash-lite-latest")
+        assertEquals("gemini-flash-lite-latest", manager.getSelectedModelName())
+
+        manager.saveApiKey("")
+        assertEquals("", manager.getEffectiveApiKey())
+
+        manager.resetToDefaultKey()
+        assertEquals(defaultKey, manager.getEffectiveApiKey())
+        manager.setSelectedModel(com.example.ai.ApiKeyManager.DEFAULT_MODEL)
     }
 }

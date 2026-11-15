@@ -21,8 +21,8 @@ import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.DeleteSweep
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.SettingsInputComponent
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -53,11 +53,16 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.example.ui.components.ApiKeySettingsDialog
 import com.example.ui.components.MorventAiOrb
 import com.example.ui.screens.AppsScreen
 import com.example.ui.screens.ChatScreen
 import com.example.ui.screens.ControlHubScreen
 import com.example.ui.screens.ScenariosScreen
+import com.example.ui.theme.MorventAmber
 import com.example.ui.theme.MorventCyan
 import com.example.ui.theme.MorventDarkBg
 import com.example.ui.theme.MorventDarkBorder
@@ -71,6 +76,9 @@ import com.example.ui.theme.MorventRose
 @Composable
 fun MorventMainScreen(
     viewModel: MorventViewModel,
+    userDisplayName: String? = null,
+    userEmail: String? = null,
+    onSignOut: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val activeTab by viewModel.activeTab.collectAsState()
@@ -82,6 +90,15 @@ fun MorventMainScreen(
     val isFloatingRunning by viewModel.isFloatingServiceRunning.collectAsState()
     val isHumanPaced by viewModel.isHumanPaced.collectAsState()
     val agentStatus by viewModel.agentStatus.collectAsState()
+
+    val apiKey by viewModel.apiKey.collectAsState()
+    val selectedModel by viewModel.selectedModel.collectAsState()
+    val connectionStatus by viewModel.connectionStatus.collectAsState()
+    val isTestingConnection by viewModel.isTestingConnection.collectAsState()
+    val connectionTestResult by viewModel.connectionTestResult.collectAsState()
+    val cloudTasks by viewModel.cloudTasks.collectAsState()
+
+    var showApiKeyDialog by remember { mutableStateOf(false) }
 
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
@@ -149,6 +166,18 @@ fun MorventMainScreen(
                     }
                 },
                 actions = {
+                    // Gemini API Key & Cloud Settings Dialog Trigger
+                    IconButton(
+                        onClick = { showApiKeyDialog = true },
+                        modifier = Modifier.testTag("open_api_settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Key,
+                            contentDescription = "مفتاح Gemini API وإعدادات Firebase",
+                            tint = if (apiKey.isNotBlank()) MorventEmerald else MorventAmber
+                        )
+                    }
+
                     // Floating Background Agent HUD Toggle
                     IconButton(
                         onClick = { viewModel.toggleFloatingService() }
@@ -307,7 +336,35 @@ fun MorventMainScreen(
                 MorventTab.SCENARIOS -> ScenariosScreen(
                     macros = viewModel.macros,
                     deviceStatus = deviceStatus,
-                    onRunMacro = { viewModel.runMacro(it) }
+                    onRunMacro = { viewModel.runMacro(it) },
+                    apiKeyConfigured = apiKey.isNotBlank(),
+                    selectedModel = selectedModel,
+                    connectionStatus = connectionStatus,
+                    syncedTasksCount = cloudTasks.size,
+                    onOpenApiSettings = { showApiKeyDialog = true }
+                )
+            }
+
+            if (showApiKeyDialog) {
+                ApiKeySettingsDialog(
+                    currentApiKey = apiKey,
+                    selectedModel = selectedModel,
+                    connectionStatus = connectionStatus,
+                    isTestingConnection = isTestingConnection,
+                    testResult = connectionTestResult,
+                    userDisplayName = userDisplayName,
+                    userEmail = userEmail,
+                    syncedTasksCount = cloudTasks.size,
+                    onSaveApiKey = { viewModel.saveApiKey(it) },
+                    onSelectModel = { viewModel.selectAiModel(it) },
+                    onTestConnection = { viewModel.testAiConnection(it) },
+                    onResetDefaultKey = { viewModel.resetDefaultApiKey() },
+                    onClearKey = { viewModel.clearApiKey() },
+                    onSignOut = {
+                        showApiKeyDialog = false
+                        onSignOut()
+                    },
+                    onDismiss = { showApiKeyDialog = false }
                 )
             }
         }

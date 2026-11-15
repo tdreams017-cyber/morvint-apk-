@@ -2,11 +2,16 @@ package com.example.nlp
 
 import android.content.Context
 import android.provider.Settings
+import com.example.ai.ApiKeyManager
+import com.example.cloud.MorventCloudRepository
 import com.example.device.DeviceController
 import com.example.model.ActionType
 import com.example.model.ChatMessage
 import com.example.model.MessageStatus
 import com.example.service.MorventFloatingAgentService
+import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.auth
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -27,21 +32,30 @@ class MorventAgentHub private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val hubScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
+    val apiKeyManager = ApiKeyManager.getInstance(appContext)
     val deviceController = DeviceController(appContext)
     val artemisEngine = ArtemisAgentEngine(appContext, deviceController)
     val commandEngine = MorventCommandEngine(appContext, deviceController, artemisEngine)
 
+    private val cloudRepo: MorventCloudRepository? by lazy {
+        runCatching {
+            if (FirebaseApp.getApps(appContext).isNotEmpty()) {
+                MorventCloudRepository(appContext, Firebase.auth)
+            } else null
+        }.getOrNull()
+    }
+
     private val _messages = MutableStateFlow(
         listOf(
             ChatMessage(
-                text = "مرحباً بك! أنا **مورڤينت (Morvent)**، وكيل التحكم الشامل بالهاتف المدعوم بـ **Gemini Vision + Google Artemis**.\n" +
-                        "أرى شاشتك وأتحكم في كل تطبيق وكل إعداد باللمس والسحب والكتابة تماماً مثل الإنسان. اطلب أي شيء تريده — وحتى أثناء عملي في الخلفية يمكنك توجيهي أو إيقافي في أي لحظة!",
+                text = "مرحباً بك! أنا **مورڤينت (Morvent)**، مساعد الذكاء الاصطناعي ووكيل التحكم الشامل بالهاتف المدعوم بـ **Gemini AI + Google Artemis**.\n" +
+                        "يمكنك التحدث معي في أي موضوع وسأجيبك بالذكاء الاصطناعي فوراً، أو طلب أي مهمة تحكم على هاتفك وسأنفذها مثل الإنسان!",
                 isUser = false,
                 actionType = ActionType.HELP,
                 subSteps = listOf(
-                    "رؤية حية للشاشة (Screenshot + Multi-Window UI Tree) عبر Gemini 3.8 Flash",
+                    "محادثة حرة بالذكاء الاصطناعي وفهم سياق الكلام عبر Gemini",
                     "تحكم بشري كامل: نقر، نقر مزدوج، ضغط مطول، سحب، تكبير، وكتابة",
-                    "توجيه حي أثناء التنفيذ (Live Steering) من الشات أو الفقاعة العائمة أو الإشعار"
+                    "مزامنة سحابية عبر Firebase وإمكانية تعديل مفتاح Gemini API من الإعدادات 🔑"
                 )
             )
         )
@@ -65,6 +79,23 @@ class MorventAgentHub private constructor(context: Context) {
 
     fun appendMessage(message: ChatMessage) {
         _messages.update { it + message }
+        syncMessageToCloud(message)
+    }
+
+    private fun syncMessageToCloud(message: ChatMessage) {
+        val hasFirebase = runCatching { FirebaseApp.getApps(appContext).isNotEmpty() }.getOrDefault(false)
+        if (!hasFirebase) return
+        val uid = runCatching { Firebase.auth.currentUser?.uid }.getOrNull() ?: return
+        if (uid.isBlank() || message.text == "جاري التفكير والصياغة...") return
+        hubScope.launch(Dispatchers.IO) {
+            runCatching {
+                cloudRepo?.saveChatMessage(
+                    text = message.text,
+                    isUser = message.isUser,
+                    status = message.status.name
+                )
+            }
+        }
     }
 
     /**
@@ -145,16 +176,27 @@ class MorventAgentHub private constructor(context: Context) {
             }
         }
 
-        // 2.5 General AI Chat QA check (answering any general question)
+        // 2.5 General AI Chat QA check (answering any general question or conversation via Gemini AI)
         if (isGeneralChatQuestion(trimmed) && !commandEngine.isFastDeterministicCommand(trimmed)) {
+            val recentHistory = _messages.value
+                .dropLast(1) // exclude current message just appended
+                .filter { it.text != "جاري التفكير والصياغة..." && it.actionType != ActionType.HELP || it.isUser }
+                .takeLast(8)
+                .map { ChatTurn(isUser = it.isUser, text = it.text) }
+
             _isThinking.value = true
-            appendMessage(ChatMessage(text = "جاري التفكير والصياغة...", isUser = false, status = MessageStatus.INFO))
+            _messages.update { it + ChatMessage(text = "جاري التفكير والصياغة...", isUser = false, status = MessageStatus.INFO) }
             hubScope.launch {
-                val answer = artemisEngine.answerGeneralChat(trimmed)
+                val answer = artemisEngine.answerGeneralChat(trimmed, recentHistory)
                 _isThinking.value = false
-                _messages.update { list ->
-                    list.dropLast(1) + ChatMessage(text = answer, isUser = false, actionType = ActionType.HELP)
-                }
+                val replyMsg = ChatMessage(
+                    text = answer,
+                    isUser = false,
+                    status = if (answer.startsWith("⚠️") || answer.startsWith("تعذر الوصول")) MessageStatus.ERROR else MessageStatus.SUCCESS,
+                    actionType = ActionType.HELP
+                )
+                _messages.update { list -> list.dropLast(1) + replyMsg }
+                syncMessageToCloud(replyMsg)
                 speakIfEnabled(answer)
                 onResult?.invoke(true, answer)
             }
@@ -294,6 +336,20 @@ class MorventAgentHub private constructor(context: Context) {
                     subSteps = logs
                 )
                 appendMessage(finishMsg)
+                val hasFirebase = runCatching { FirebaseApp.getApps(appContext).isNotEmpty() }.getOrDefault(false)
+                if (hasFirebase && runCatching { Firebase.auth.currentUser != null }.getOrDefault(false)) {
+                    hubScope.launch(Dispatchers.IO) {
+                        runCatching {
+                            cloudRepo?.createTaskRecord(
+                                goal = goalText,
+                                status = if (success) "completed" else "error",
+                                summary = resultMsg,
+                                stepsCount = logs.size.coerceAtLeast(1),
+                                aiProvider = apiKeyManager.getSelectedModelName()
+                            )
+                        }
+                    }
+                }
                 speakIfEnabled(resultMsg)
                 onResult?.invoke(success, resultMsg)
             }

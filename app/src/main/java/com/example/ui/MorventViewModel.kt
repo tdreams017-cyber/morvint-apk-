@@ -6,6 +6,8 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.cloud.CloudTaskRecord
+import com.example.cloud.MorventCloudRepository
 import com.example.model.ActionCardData
 import com.example.model.ActionType
 import com.example.model.ChatMessage
@@ -14,13 +16,19 @@ import com.example.model.InstalledApp
 import com.example.model.MessageStatus
 import com.example.model.MorventMacro
 import com.example.nlp.AgentStatus
+import com.example.nlp.ApiConnectionTestResult
 import com.example.nlp.MorventAgentHub
 import com.example.service.MorventAccessibilityService
 import com.example.service.MorventFloatingAgentService
+import com.google.firebase.Firebase
+import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.auth
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -34,6 +42,7 @@ enum class MorventTab {
 class MorventViewModel(application: Application) : AndroidViewModel(application) {
 
     private val agentHub = MorventAgentHub.getInstance(application)
+    val apiKeyManager = agentHub.apiKeyManager
     val deviceController = agentHub.deviceController
     val artemisEngine = agentHub.artemisEngine
 
@@ -42,6 +51,22 @@ class MorventViewModel(application: Application) : AndroidViewModel(application)
     val isTtsEnabled: StateFlow<Boolean> = agentHub.isTtsEnabled
     val agentStatus: StateFlow<AgentStatus> = artemisEngine.status
     val isFloatingServiceRunning: StateFlow<Boolean> = MorventFloatingAgentService.runningFlow
+
+    val apiKey: StateFlow<String> = apiKeyManager.apiKey
+    val selectedModel: StateFlow<String> = apiKeyManager.selectedModel
+    val connectionStatus: StateFlow<String> = apiKeyManager.lastConnectionStatus
+
+    private val _isTestingConnection = MutableStateFlow(false)
+    val isTestingConnection: StateFlow<Boolean> = _isTestingConnection.asStateFlow()
+
+    private val _connectionTestResult = MutableStateFlow<ApiConnectionTestResult?>(null)
+    val connectionTestResult: StateFlow<ApiConnectionTestResult?> = _connectionTestResult.asStateFlow()
+
+    private val _cloudTasks = MutableStateFlow<List<CloudTaskRecord>>(emptyList())
+    val cloudTasks: StateFlow<List<CloudTaskRecord>> = _cloudTasks.asStateFlow()
+
+    private var cloudObserverJob: Job? = null
+    private var observedUserId: String? = null
 
     private val _isHumanPaced = MutableStateFlow(artemisEngine.status.value.isHumanPaced)
     val isHumanPaced: StateFlow<Boolean> = _isHumanPaced.asStateFlow()
@@ -117,6 +142,73 @@ class MorventViewModel(application: Application) : AndroidViewModel(application)
 
         refreshDeviceStatus()
         loadInstalledApps()
+    }
+
+    fun bindAuthenticatedUser(userId: String?) {
+        if (userId.isNullOrBlank()) {
+            cloudObserverJob?.cancel()
+            cloudObserverJob = null
+            observedUserId = null
+            _cloudTasks.value = emptyList()
+            return
+        }
+        if (observedUserId == userId && cloudObserverJob?.isActive == true) return
+        observedUserId = userId
+        cloudObserverJob?.cancel()
+
+        val app = getApplication<Application>()
+        if (FirebaseApp.getApps(app).isEmpty()) return
+
+        cloudObserverJob = viewModelScope.launch {
+            val repo = MorventCloudRepository(app, Firebase.auth)
+            Firebase.auth.currentUser?.let { repo.ensureUserProfile(it, selectedModel.value) }
+            repo.observeTasks(userId)
+                .catch { /* logged inside repository */ }
+                .collect { tasks -> _cloudTasks.value = tasks }
+        }
+    }
+
+    fun saveApiKey(newKey: String) {
+        apiKeyManager.saveApiKey(newKey)
+        artemisEngine.resetCloudAvailability()
+        _connectionTestResult.value = null
+    }
+
+    fun resetDefaultApiKey() {
+        val key = apiKeyManager.resetToDefaultKey()
+        artemisEngine.resetCloudAvailability()
+        _connectionTestResult.value = null
+        if (key.isNotBlank()) {
+            testAiConnection(key)
+        }
+    }
+
+    fun clearApiKey() {
+        apiKeyManager.saveApiKey("")
+        artemisEngine.resetCloudAvailability()
+        _connectionTestResult.value = null
+    }
+
+    fun selectAiModel(modelName: String) {
+        apiKeyManager.setSelectedModel(modelName)
+        artemisEngine.resetCloudAvailability()
+        val app = getApplication<Application>()
+        if (FirebaseApp.getApps(app).isNotEmpty() && Firebase.auth.currentUser != null) {
+            viewModelScope.launch(Dispatchers.IO) {
+                MorventCloudRepository(app, Firebase.auth).updatePreferredModel(modelName)
+            }
+        }
+    }
+
+    fun testAiConnection(keyToTest: String) {
+        if (_isTestingConnection.value) return
+        _isTestingConnection.value = true
+        _connectionTestResult.value = null
+        viewModelScope.launch {
+            val res = artemisEngine.testApiKeyConnection(keyToTest, selectedModel.value)
+            _connectionTestResult.value = res
+            _isTestingConnection.value = false
+        }
     }
 
     fun setTab(tab: MorventTab) {

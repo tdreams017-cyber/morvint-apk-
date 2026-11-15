@@ -1,0 +1,125 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and AI assistant preferences for Morvent.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "User display name from Google Sign-In."
+        },
+        "email": {
+          "type": "string",
+          "description": "User email address."
+        },
+        "preferredModel": {
+          "type": "string",
+          "description": "Preferred Gemini model name."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when profile was last updated."
+        }
+      },
+      "required": ["uid", "createdAt", "updatedAt"]
+    },
+    "AgentTaskRecord": {
+      "title": "AgentTaskRecord",
+      "description": "Cloud-synced autonomous task execution record.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "goal": {
+          "type": "string",
+          "description": "The command or multi-step automation goal requested by the user."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["running", "completed", "error", "paused"],
+          "description": "Execution status."
+        },
+        "summary": {
+          "type": "string",
+          "description": "Result summary or diagnostic message."
+        },
+        "stepsCount": {
+          "type": "integer",
+          "description": "Number of executed or planned steps."
+        },
+        "aiProvider": {
+          "type": "string",
+          "description": "Model or engine used (e.g., gemini-3.5-flash-lite, Local Artemis)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when task started."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when task updated."
+        }
+      },
+      "required": ["userId", "goal", "status", "stepsCount", "createdAt", "updatedAt"]
+    },
+    "CloudChatMessage": {
+      "title": "CloudChatMessage",
+      "description": "Cloud-synced conversation message between the user and Morvent AI.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID."
+        },
+        "text": {
+          "type": "string",
+          "description": "Message body."
+        },
+        "isUser": {
+          "type": "boolean",
+          "description": "True if authored by user, false if Morvent AI reply."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["SUCCESS", "ERROR", "INFO", "PENDING", "EXECUTING"],
+          "description": "Message status."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp (FieldValue.serverTimestamp()) when message was saved."
+        }
+      },
+      "required": ["userId", "text", "isUser", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Per-user profile and AI model settings."
+    },
+    "/users/{userId}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/AgentTaskRecord" },
+      "description": "Per-user autonomous execution task history synced across devices."
+    },
+    "/users/{userId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/CloudChatMessage" },
+      "description": "Per-user synced chat history with Morvent Gemini AI."
+    }
+  }
+}

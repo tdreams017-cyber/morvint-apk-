@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Speed
@@ -58,6 +59,11 @@ fun ScenariosScreen(
     macros: List<MorventMacro>,
     deviceStatus: DeviceStatus,
     onRunMacro: (MorventMacro) -> Unit,
+    apiKeyConfigured: Boolean = true,
+    selectedModel: String = "gemini-3.5-flash-lite",
+    connectionStatus: String = "",
+    syncedTasksCount: Int = 0,
+    onOpenApiSettings: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -72,15 +78,86 @@ fun ScenariosScreen(
     ) {
         Column {
             Text(
-                text = "الأوضاع الذكية وسيناريوهات التحكم",
+                text = "الأوضاع الذكية وإعدادات الذكاء الاصطناعي",
                 style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                 color = Color.White
             )
             Text(
-                text = "تنفيذ سلاسل أوامر مؤتمتة بنقرة واحدة لتكييف الهاتف بالكامل",
+                text = "إدارة مفتاح Gemini API، المزامنة السحابية مع Firebase، والسيناريوهات السريعة",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.Gray
             )
+        }
+
+        // Gemini API & Firebase Settings Entry Card
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .border(1.dp, MorventPurple.copy(alpha = 0.5f), RoundedCornerShape(18.dp)),
+            colors = CardDefaults.cardColors(containerColor = MorventDarkSurfaceElevated)
+        ) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Key, contentDescription = null, tint = MorventCyan, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "مفتاح Gemini API و Firebase",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (apiKeyConfigured) MorventEmerald.copy(alpha = 0.2f) else MorventRose.copy(alpha = 0.2f)
+                    ) {
+                        Text(
+                            text = if (apiKeyConfigured) "المفتاح مفعّل ✓" else "يحتاج مفتاح",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (apiKeyConfigured) MorventEmerald else MorventRose,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        )
+                    }
+                }
+
+                Text(
+                    text = "النموذج النشط: $selectedModel • مهام Firebase المحفوظة: $syncedTasksCount",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color.LightGray,
+                    fontSize = 11.sp
+                )
+                if (connectionStatus.isNotBlank()) {
+                    Text(
+                        text = connectionStatus,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MorventCyan,
+                        fontSize = 11.sp
+                    )
+                }
+
+                Button(
+                    onClick = onOpenApiSettings,
+                    colors = ButtonDefaults.buttonColors(containerColor = MorventCyan),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.Key, contentDescription = null, tint = Color.Black, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "إدخال / تعديل مفتاح API واختبار الاتصال",
+                        color = Color.Black,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+            }
         }
 
         // Live Sensors telemetry

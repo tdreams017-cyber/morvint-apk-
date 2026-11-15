@@ -66,9 +66,15 @@ data class AgentStatus(
 class ArtemisAgentEngine(
     private val context: Context,
     private val controller: DeviceController,
-    private val brain: GeminiAgentBrain = GeminiAgentBrain()
+    private val brain: GeminiAgentBrain = GeminiAgentBrain(context)
 ) {
-    suspend fun answerGeneralChat(question: String): String = brain.answerGeneralChat(question)
+    suspend fun answerGeneralChat(question: String, history: List<ChatTurn> = emptyList()): String =
+        brain.answerGeneralChat(question, history)
+
+    suspend fun testApiKeyConnection(apiKey: String, preferredModel: String): ApiConnectionTestResult =
+        brain.testApiKeyConnection(apiKey, preferredModel)
+
+    fun resetCloudAvailability() = brain.resetCloudAvailability()
     private val tag = "ArtemisAgent"
     private val agentScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var executionJob: Job? = null

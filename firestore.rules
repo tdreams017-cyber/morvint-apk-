@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.matches('^[a-zA-Z0-9_\\-]+$') && id.size() <= 128;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasOnly(['uid', 'displayName', 'email', 'preferredModel', 'createdAt', 'updatedAt']) &&
+             data.uid is string && data.uid == userId &&
+             (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 120)) &&
+             (!('email' in data) || (data.email is string && data.email.size() <= 200)) &&
+             (!('preferredModel' in data) || (data.preferredModel is string && data.preferredModel.size() <= 80)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidTask(data, userId) {
+      return data.keys().hasOnly(['userId', 'goal', 'status', 'summary', 'stepsCount', 'aiProvider', 'createdAt', 'updatedAt']) &&
+             data.userId is string && data.userId == userId &&
+             data.goal is string && data.goal.size() >= 1 && data.goal.size() <= 2000 &&
+             data.status is string && data.status in ['running', 'completed', 'error', 'paused'] &&
+             (!('summary' in data) || (data.summary is string && data.summary.size() <= 4000)) &&
+             data.stepsCount is int && data.stepsCount >= 0 && data.stepsCount <= 1000 &&
+             (!('aiProvider' in data) || (data.aiProvider is string && data.aiProvider.size() <= 100)) &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidChatMessage(data, userId) {
+      return data.keys().hasOnly(['userId', 'text', 'isUser', 'status', 'createdAt']) &&
+             data.userId is string && data.userId == userId &&
+             data.text is string && data.text.size() >= 1 && data.text.size() <= 8000 &&
+             data.isUser is bool &&
+             data.status is string && data.status in ['SUCCESS', 'ERROR', 'INFO', 'PENDING', 'EXECUTING'] &&
+             data.createdAt is timestamp && data.createdAt <= request.time;
+    }
+
+    match /users/{userId} {
+      allow get: if isOwner(userId);
+      allow list: if false;
+      allow create: if isOwner(userId) && isValidId(userId) && isValidUserProfile(request.resource.data, userId);
+      allow update: if isOwner(userId) &&
+                       isValidUserProfile(request.resource.data, userId) &&
+                       request.resource.data.uid == resource.data.uid &&
+                       request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isOwner(userId);
+
+      match /tasks/{taskId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(taskId) && isValidTask(request.resource.data, userId);
+        allow update: if isOwner(userId) &&
+                         isValidTask(request.resource.data, userId) &&
+                         request.resource.data.userId == resource.data.userId &&
+                         request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if isOwner(userId);
+      }
+
+      match /messages/{messageId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(messageId) && isValidChatMessage(request.resource.data, userId);
+        allow update: if isOwner(userId) &&
+                         isValidChatMessage(request.resource.data, userId) &&
+                         request.resource.data.userId == resource.data.userId &&
+                         request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
