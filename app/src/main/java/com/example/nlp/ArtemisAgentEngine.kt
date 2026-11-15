@@ -105,6 +105,7 @@ class ArtemisAgentEngine(
 
     fun setPacing(humanPaced: Boolean) {
         _status.value = _status.value.copy(isHumanPaced = humanPaced)
+        MorventAccessibilityService.fastTurboMode = keyManager.silentExecutionMode.value || !humanPaced
     }
 
     fun isBusy(): Boolean = _status.value.isActive
@@ -194,18 +195,20 @@ class ArtemisAgentEngine(
         appendedGoalsQueue.clear()
         val keepHumanPacing = _status.value.isHumanPaced
         val silentMode = keyManager.silentExecutionMode.value
+        MorventAccessibilityService.fastTurboMode = silentMode || !keepHumanPacing
         val maxSteps = 300
 
         executionJob = agentScope.launch {
             val logs = mutableListOf<String>()
             val stepHistory = mutableListOf<String>()
             val humanDelay = when {
-                silentMode -> 360L
-                keepHumanPacing -> 680L
-                else -> 250L
+                silentMode -> 25L
+                keepHumanPacing -> 220L
+                else -> 35L
             }
             var lastActionSignature = ""
             var repeatSignatureCount = 0
+            var lastActionFailed = false
 
             fun addLog(msg: String) {
                 logs.add(msg)
@@ -217,8 +220,8 @@ class ArtemisAgentEngine(
                 // Fast pre-check for pure screen reading if Accessibility is disabled
                 val lowerGoal = goalText.lowercase(Locale.ROOT)
                 val isPureScreenRead = (lowerGoal.contains("اقرأ") || lowerGoal.contains("اقرا") ||
-                        lowerGoal.contains("لخص") || lowerGoal.contains("ماذا على")) &&
-                        lowerGoal.contains("شاشة")
+                        lowerGoal.contains("لخص") || lowerGoal.contains("تحليل") || lowerGoal.contains("ماذا على")) &&
+                        (lowerGoal.contains("شاشة") || lowerGoal.contains("صفحة"))
                 if (isPureScreenRead && !MorventAccessibilityService.isRunning) {
                     lastErrorRequiresAccessibility = true
                     val msg = "لقراءة محتوى الشاشة والتحكم بالتطبيقات مثل الإنسان، يرجى تفعيل خدمة إمكانية الوصول لمورڤينت أولاً ⚙️."
@@ -260,7 +263,7 @@ class ArtemisAgentEngine(
 
                 for (stepNum in 1..maxSteps) {
                     while (isPaused) {
-                        delay(200)
+                        delay(150)
                     }
 
                     if (skipRequested) {
@@ -270,16 +273,24 @@ class ArtemisAgentEngine(
                         continue
                     }
 
-                    // 1. PERCEIVE
+                    // 1. PERCEIVE (UI Tree first; adaptive screenshot only for sparse/WebView/failed/periodic verification)
                     _status.value = _status.value.copy(
                         state = AgentExecutionState.PERCEIVING,
                         currentStepIndex = stepNum,
                         queuedStepsCount = appendedGoalsQueue.size,
-                        statusMessage = "رصد وقراءة الشاشة الحية (خطوة $stepNum/$maxSteps)..."
+                        statusMessage = "رصد الواجهة العميقة (خطوة $stepNum/$maxSteps)..."
                     )
 
                     val snapshot = MorventAccessibilityService.captureRichScreenSnapshot()
-                    val screenshot = MorventAccessibilityService.captureScreenBitmap(maxWidthPx = 720)
+                    val needsVisionBitmap = snapshot.hasSparseTree ||
+                        snapshot.elements.size < 5 ||
+                        lastActionFailed ||
+                        (stepNum % 4 == 0)
+                    val screenshot = if (needsVisionBitmap) {
+                        MorventAccessibilityService.captureScreenBitmap(maxWidthPx = 800)
+                    } else {
+                        null
+                    }
                     if (snapshot.packageName.isNotBlank()) {
                         _status.value = _status.value.copy(activeAppPackage = snapshot.packageName)
                     }
@@ -287,7 +298,7 @@ class ArtemisAgentEngine(
                     // 2. PLAN / REASON via Gemini
                     _status.value = _status.value.copy(
                         state = AgentExecutionState.PLANNING,
-                        statusMessage = "تحليل الواجهة واتخاذ القرار البشري (خطوة $stepNum)..."
+                        statusMessage = "تحليل الواجهة واتخاذ القرار الذكي (خطوة $stepNum)..."
                     )
 
                     val activeSteerings = steeringNotes.toList()
@@ -312,7 +323,7 @@ class ArtemisAgentEngine(
                     }
 
                     while (isPaused) {
-                        delay(200)
+                        delay(150)
                     }
 
                     when (brainResult) {
@@ -371,22 +382,31 @@ class ArtemisAgentEngine(
                                 return@launch
                             }
 
-                            if (decision.action == AgentActionKind.READ_SCREEN) {
-                                val readText = decision.finalResponse.ifBlank {
-                                    snapshot.visibleTexts.joinToString("\n")
+                            if (decision.action == AgentActionKind.READ_SCREEN ||
+                                decision.action == AgentActionKind.DEEP_READ_SCREEN
+                            ) {
+                                val readText = if (decision.action == AgentActionKind.DEEP_READ_SCREEN) {
+                                    val (deepOk, deepReport) = MorventAccessibilityService.deepReadComplexScreen()
+                                    if (deepOk) deepReport else decision.finalResponse.ifBlank {
+                                        snapshot.visibleTexts.joinToString("\n")
+                                    }
+                                } else {
+                                    decision.finalResponse.ifBlank {
+                                        snapshot.visibleTexts.joinToString("\n")
+                                    }
                                 }.ifBlank { "لم يتم العثور على نص مقروء على الشاشة الحالية." }
                                 if (appendedGoalsQueue.isEmpty()) {
                                     _status.value = _status.value.copy(
                                         state = AgentExecutionState.COMPLETED,
                                         currentStepIndex = stepNum,
-                                        statusMessage = "تمت قراءة محتوى الشاشة ✓"
+                                        statusMessage = "تمت القراءة العميقة للشاشة ✓"
                                     )
                                     addLog("📖 قراءة الشاشة: $readText")
                                     onFinished(true, readText, logs)
                                     return@launch
                                 } else {
                                     addLog("📖 قراءة الشاشة: $readText")
-                                    stepHistory.add("خطوة $stepNum: قراءة الشاشة")
+                                    stepHistory.add("خطوة $stepNum: قراءة الشاشة العميقة")
                                     continue
                                 }
                             }
@@ -402,7 +422,7 @@ class ArtemisAgentEngine(
                                 )
                                 addLog("🙋 مطلوب من المستخدم: $question")
                                 while (isPaused) {
-                                    delay(250)
+                                    delay(200)
                                 }
                                 stepHistory.add("خطوة $stepNum: تدخل المستخدم وأكمل الخطوة الحساسة")
                                 continue
@@ -410,15 +430,16 @@ class ArtemisAgentEngine(
 
                             // Anti-loop protection for long workflows
                             val sig = "${decision.action}:${decision.elementId}:${decision.target}:${decision.text}:${decision.x}:${decision.y}"
-                            if (sig == lastActionSignature) {
+                            if (sig == lastActionSignature && decision.steps.isEmpty()) {
                                 repeatSignatureCount++
                                 if (repeatSignatureCount >= 3) {
                                     addLog("🔄 اكتشاف تكرار في نفس الخطوة؛ تنفيذ تمرير/استعادة تلقائية للمسار")
                                     MorventAccessibilityService.scrollScreen(true)
-                                    steeringNotes.add("الخطوة السابقة تكررت 3 مرات بدون تقدم؛ غيّر أسلوبك فوراً أو استخدم إحداثيات أخرى أو الرجوع.")
+                                    steeringNotes.add("الخطوة السابقة تكررت 3 مرات بدون تقدم؛ غيّر أسلوبك فوراً أو استخدم SMART_FIND_CLICK أو إحداثيات أخرى أو الرجوع.")
                                     repeatSignatureCount = 0
+                                    lastActionFailed = true
                                     stepHistory.add("خطوة $stepNum: فك تعليق التمرير التلقائي")
-                                    delay(humanDelay)
+                                    delay(160L)
                                     continue
                                 }
                             } else {
@@ -426,15 +447,15 @@ class ArtemisAgentEngine(
                                 repeatSignatureCount = 1
                             }
 
-                            // 3. ACT
+                            // 3. ACT (Supports multi-action fast batching via decision.steps!)
                             _status.value = _status.value.copy(
                                 state = AgentExecutionState.ACTING,
                                 statusMessage = decision.statusLabel
                             )
-                            delay(humanDelay)
+                            if (humanDelay > 0L) delay(humanDelay)
 
                             while (isPaused) {
-                                delay(200)
+                                delay(150)
                             }
                             if (skipRequested) {
                                 skipRequested = false
@@ -442,18 +463,58 @@ class ArtemisAgentEngine(
                                 continue
                             }
 
-                            val (ok, actionFeedback) = executeDecision(decision)
-                            addLog(if (ok) "⚡ تنفيذ: $actionFeedback ✓" else "⚠️ محاولة: $actionFeedback")
-                            stepHistory.add("خطوة $stepNum (${decision.action}): $actionFeedback [نجاح=$ok]")
-
-                            // 4. VERIFY / SETTLE
-                            _status.value = _status.value.copy(state = AgentExecutionState.VERIFYING)
-                            val settleTime = when (decision.action) {
-                                AgentActionKind.LAUNCH_APP, AgentActionKind.OPEN_URL -> 1400L
-                                AgentActionKind.WAIT -> decision.waitMs
-                                else -> humanDelay
+                            val uiTsBeforeAction = MorventAccessibilityService.currentUiMutationTimestamp()
+                            val batchToRun = if (decision.steps.isNotEmpty()) {
+                                decision.steps
+                            } else {
+                                listOf(decision)
                             }
-                            delayChunked(settleTime)
+
+                            var batchAllOk = true
+                            val batchFeedbacks = mutableListOf<String>()
+                            var lastExecutedKind = decision.action
+                            for ((subIdx, subDecision) in batchToRun.withIndex()) {
+                                while (isPaused) delay(150)
+                                if (skipRequested) break
+                                val subTs = MorventAccessibilityService.currentUiMutationTimestamp()
+                                val (subOk, subFb) = executeDecision(subDecision)
+                                batchAllOk = batchAllOk && subOk
+                                lastExecutedKind = subDecision.action
+                                batchFeedbacks.add(subFb)
+                                addLog(if (subOk) "⚡ تنفيذ: $subFb ✓" else "⚠️ محاولة: $subFb")
+                                if (!subOk) break
+                                if (subIdx < batchToRun.lastIndex) {
+                                    MorventAccessibilityService.waitForUiChangeOrSettle(
+                                        sinceTimestampMs = subTs,
+                                        minWaitMs = 45L,
+                                        maxWaitMs = 200L
+                                    )
+                                }
+                            }
+
+                            lastActionFailed = !batchAllOk
+                            stepHistory.add("خطوة $stepNum (${lastExecutedKind}): ${batchFeedbacks.joinToString(" -> ")} [نجاح=$batchAllOk]")
+
+                            // 4. VERIFY / EVENT-DRIVEN ULTRA-FAST SETTLE
+                            _status.value = _status.value.copy(state = AgentExecutionState.VERIFYING)
+                            when (lastExecutedKind) {
+                                AgentActionKind.WAIT -> delayChunked(decision.waitMs)
+                                AgentActionKind.LAUNCH_APP, AgentActionKind.OPEN_URL -> {
+                                    MorventAccessibilityService.waitForUiChangeOrSettle(
+                                        sinceTimestampMs = uiTsBeforeAction,
+                                        minWaitMs = 160L,
+                                        maxWaitMs = 950L
+                                    )
+                                }
+                                else -> {
+                                    val minSettle = if (silentMode || !keepHumanPacing) 75L else 180L
+                                    MorventAccessibilityService.waitForUiChangeOrSettle(
+                                        sinceTimestampMs = uiTsBeforeAction,
+                                        minWaitMs = minSettle,
+                                        maxWaitMs = 420L
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -568,7 +629,10 @@ class ArtemisAgentEngine(
             if (ok) {
                 step.isDone = true
                 completedCount++
-                if (step.actionType == "READ_SCREEN_LOCAL" || step.actionType == "READ_NOTIFICATIONS") {
+                if (step.actionType == "READ_SCREEN_LOCAL" ||
+                    step.actionType == "DEEP_READ_SCREEN_LOCAL" ||
+                    step.actionType == "READ_NOTIFICATIONS"
+                ) {
                     lastReadContent = detail
                 }
                 onLog("تم بنجاح: ${step.description} ✓")
@@ -580,15 +644,18 @@ class ArtemisAgentEngine(
                 }
                 // Self-healing recovery: wait for settle, scroll, and retry
                 onLog("محاولة الإصلاح الذاتي واستقرار الشاشة للخطوة: ${step.description}...")
-                delayChunked(1200L)
+                delayChunked(320L)
                 MorventAccessibilityService.scrollScreen(true)
-                delayChunked(700L)
+                delayChunked(240L)
 
                 val (retryOk, retryDetail) = executeSingleLocalStep(step)
                 if (retryOk) {
                     step.isDone = true
                     completedCount++
-                    if (step.actionType == "READ_SCREEN_LOCAL" || step.actionType == "READ_NOTIFICATIONS") {
+                    if (step.actionType == "READ_SCREEN_LOCAL" ||
+                        step.actionType == "DEEP_READ_SCREEN_LOCAL" ||
+                        step.actionType == "READ_NOTIFICATIONS"
+                    ) {
                         lastReadContent = retryDetail
                     }
                     onLog("تمت الاستعادة والنجاح تلقائياً: ${step.description} ✓")
@@ -681,14 +748,31 @@ class ArtemisAgentEngine(
                 Pair(ok, if (ok) "ضغط مطول عند (${decision.x}, ${decision.y})" else "تعذر الضغط المطول")
             }
 
+            AgentActionKind.SMART_FIND_CLICK -> {
+                val q = decision.target.ifBlank { decision.text }
+                MorventAccessibilityService.findAndClickSmart(q)
+            }
+
             AgentActionKind.TYPE_TEXT -> {
-                val res = MorventAccessibilityService.typeTextIntoElementById(
-                    elementId = decision.elementId,
-                    textToType = decision.text,
-                    submitEnter = decision.submitEnter
-                )
-                if (res.first) res
-                else MorventAccessibilityService.typeTextIntoField(null, decision.text)
+                if (decision.elementId != null) {
+                    val res = MorventAccessibilityService.typeTextIntoElementById(
+                        elementId = decision.elementId,
+                        textToType = decision.text,
+                        submitEnter = decision.submitEnter
+                    )
+                    if (res.first) res
+                    else MorventAccessibilityService.smartTypeAndSubmit(
+                        targetField = decision.target.ifBlank { null },
+                        textToType = decision.text,
+                        submit = decision.submitEnter
+                    )
+                } else {
+                    MorventAccessibilityService.smartTypeAndSubmit(
+                        targetField = decision.target.ifBlank { null },
+                        textToType = decision.text,
+                        submit = decision.submitEnter
+                    )
+                }
             }
 
             AgentActionKind.SCROLL_DOWN -> MorventAccessibilityService.scrollScreen(true)
@@ -737,6 +821,8 @@ class ArtemisAgentEngine(
             }
 
             AgentActionKind.DEVICE_CONTROL -> executeDeviceControl(decision.target)
+
+            AgentActionKind.DEEP_READ_SCREEN -> MorventAccessibilityService.deepReadComplexScreen()
 
             AgentActionKind.WAIT -> {
                 delay(decision.waitMs)
@@ -1088,12 +1174,18 @@ class ArtemisAgentEngine(
             return steps
         }
 
-        // 0B. Screen Reading
+        // 0B. Screen Reading (Deep vs Quick Local)
         if ((lower.contains("اقرأ") || lower.contains("اقرا") || lower.contains("لخص") ||
-                lower.contains("read screen") || lower.contains("ماذا على")) &&
-            (lower.contains("شاشة") || lower.contains("screen"))
+                lower.contains("تحليل") || lower.contains("read screen") || lower.contains("ماذا على")) &&
+            (lower.contains("شاشة") || lower.contains("صفحة") || lower.contains("screen"))
         ) {
-            steps.add(AgentStep(stepId++, "قراءة وتحليل جميع النصوص والعناصر على الشاشة الحالية", "READ_SCREEN_LOCAL", ""))
+            val isDeep = lower.contains("بعمق") || lower.contains("عميق") || lower.contains("كاملة") ||
+                lower.contains("معقدة") || lower.contains("تفصيل") || lower.contains("deep")
+            if (isDeep) {
+                steps.add(AgentStep(stepId++, "قراءة وتمرير عميق لمحتوى الشاشة المعقدة والعناصر التفاعلية", "DEEP_READ_SCREEN_LOCAL", ""))
+            } else {
+                steps.add(AgentStep(stepId++, "قراءة وتحليل جميع النصوص والعناصر على الشاشة الحالية", "READ_SCREEN_LOCAL", ""))
+            }
             return steps
         }
 
@@ -1730,19 +1822,20 @@ class ArtemisAgentEngine(
                     Pair(true, report)
                 }
             }
+            "DEEP_READ_SCREEN_LOCAL" -> MorventAccessibilityService.deepReadComplexScreen()
             "SEARCH_AND_PLAY" -> {
                 if (!MorventAccessibilityService.isRunning) {
                     return Pair(false, "خدمة إمكانية الوصول غير مفعلة")
                 }
                 clickWithSynonyms("بحث|Search|search_button|menu_search|البحث")
-                delayChunked(700)
+                delayChunked(320)
                 val typed = MorventAccessibilityService.typeTextIntoElementById(null, step.target, submitEnter = true)
                 if (!typed.first) {
-                    MorventAccessibilityService.typeTextIntoField(null, step.target)
+                    MorventAccessibilityService.smartTypeAndSubmit(null, step.target, submit = true)
                 }
-                delayChunked(1500)
+                delayChunked(850)
                 val firstToken = step.target.split(" ").firstOrNull() ?: step.target
-                val clicked = MorventAccessibilityService.clickElementByText(firstToken)
+                val clicked = MorventAccessibilityService.clickElementSmart(firstToken)
                 if (clicked.first) clicked else typed
             }
             "CLICK_ORDINAL" -> {
@@ -1751,19 +1844,10 @@ class ArtemisAgentEngine(
             }
             "CLICK_TEXT" -> clickWithSynonyms(step.target)
             "LONG_CLICK" -> MorventAccessibilityService.longClickElementByText(step.target)
-            "SCROLL_AND_CLICK" -> {
-                for (attempt in 0 until 5) {
-                    if (skipRequested) return Pair(false, "تم التخطي")
-                    val res = clickWithSynonyms(step.target)
-                    if (res.first) return res
-                    MorventAccessibilityService.scrollScreen(true)
-                    delayChunked(550)
-                }
-                Pair(false, "لم يتم العثور على '${step.target}' بعد التمرير")
-            }
+            "SCROLL_AND_CLICK" -> MorventAccessibilityService.findAndClickSmart(step.target)
             "TYPE_TEXT" -> {
                 val res = MorventAccessibilityService.typeTextIntoElementById(null, step.target, submitEnter = true)
-                if (res.first) res else MorventAccessibilityService.typeTextIntoField(null, step.target)
+                if (res.first) res else MorventAccessibilityService.smartTypeAndSubmit(null, step.target, submit = true)
             }
             "HUMAN_SWIPE_DOWN" -> MorventAccessibilityService.scrollScreen(true)
             "HUMAN_SWIPE_UP" -> MorventAccessibilityService.scrollScreen(false)

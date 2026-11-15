@@ -502,4 +502,67 @@ class MorventAgentRobolectricTest {
         assertTrue(types.contains("CALL_END"))
         assertTrue(types.contains("SAVE_NOTE"))
     }
+
+    @Test
+    fun `deep ui normalization, batch decision parsing, and deep screen reading work cleanly`() = runBlocking {
+        // Arabic normalization handles hamza, teh marbuta, alef maqsura, tashkeel, and tatweel
+        val norm = com.example.service.MorventAccessibilityService.Companion
+        assertEquals(
+            norm.normalizeArabicForMatch("إرسالًـ"),
+            norm.normalizeArabicForMatch("ارسال")
+        )
+        assertEquals(
+            norm.normalizeArabicForMatch("الإعداداتُ المتقدمة"),
+            norm.normalizeArabicForMatch("الاعدادات المتقدمه")
+        )
+        assertEquals(
+            norm.normalizeArabicForMatch("مفعلّ"),
+            norm.normalizeArabicForMatch("مفعل")
+        )
+
+        // Disabled-service guards return clean Arabic diagnostics without crashing
+        val deepReadOff = norm.deepReadComplexScreen()
+        assertFalse(deepReadOff.first)
+        assertTrue(deepReadOff.second.contains("إمكانية الوصول"))
+
+        val smartFindOff = norm.findAndClickSmart("الوضع الداكن")
+        assertFalse(smartFindOff.first)
+        assertTrue(smartFindOff.second.contains("إمكانية الوصول"))
+
+        // GeminiAgentBrain parses SMART_FIND_CLICK, DEEP_READ_SCREEN, and multi-action batch steps
+        val brain = com.example.nlp.GeminiAgentBrain(context)
+        val batchJson = """
+            {
+              "thought": "الضغط على البحث ثم الكتابة والإرسال فوراً",
+              "statusLabel": "بحث سريع",
+              "action": "TAP_ELEMENT",
+              "elementId": 3,
+              "steps": [
+                {"action": "TAP_ELEMENT", "elementId": 3, "x": 500, "y": 120},
+                {"action": "TYPE_TEXT", "text": "قرآن كريم", "submitEnter": true},
+                {"action": "SMART_FIND_CLICK", "target": "أول نتيجة"}
+              ]
+            }
+        """.trimIndent()
+        val parsed = brain.parseDecisionJson(batchJson)
+        assertTrue(parsed is com.example.nlp.BrainResult.Success)
+        val decision = (parsed as com.example.nlp.BrainResult.Success).decision
+        assertEquals(3, decision.steps.size)
+        assertEquals(com.example.nlp.AgentActionKind.TAP_ELEMENT, decision.steps[0].action)
+        assertEquals(com.example.nlp.AgentActionKind.TYPE_TEXT, decision.steps[1].action)
+        assertTrue(decision.steps[1].submitEnter)
+        assertEquals(com.example.nlp.AgentActionKind.SMART_FIND_CLICK, decision.steps[2].action)
+        assertEquals("أول نتيجة", decision.steps[2].target)
+
+        // Planner & command engine deep screen read routes cleanly
+        assertTrue(commandEngine.isFastDeterministicCommand("اقرأ الشاشة بعمق"))
+        val deepCmdRes = commandEngine.processCommand("اقرأ الشاشة بعمق")
+        assertEquals("REQUEST_ACCESSIBILITY_PERMISSION", deepCmdRes.actionDetail)
+
+        val deepSteps = artemisEngine.planGoal("اقرأ الشاشة بعمق")
+        assertEquals("DEEP_READ_SCREEN_LOCAL", deepSteps.first().actionType)
+
+        val quickReadSteps = artemisEngine.planGoal("اقرأ لي ما على الشاشة")
+        assertEquals("READ_SCREEN_LOCAL", quickReadSteps.first().actionType)
+    }
 }

@@ -59,6 +59,7 @@ class MorventCommandEngine(
         if (lower in listOf("رجوع", "ارجع", "الرجوع", "back", "الرئيسية", "الشاشة الرئيسية", "home", "التطبيقات الأخيرة", "recents", "لقطة شاشة", "سكرين شوت", "screenshot", "اقفل الشاشة", "lock screen", "لوحة الاشعارات", "اعدادات سريعة", "الملفات")) return true
         if (containsAny(lower, "وضع النوم", "تجهيز النوم", "sleep mode", "وضع الاجتماع", "وضع العمل", "meeting mode", "توفير الطاقة", "توفير البطارية", "power save", "طوارئ", "وضع الطوارئ", "emergency") && wordCount <= 5) return true
         if (containsAny(lower, "من انت", "من أنت", "who are you", "مساعدة", "اوامر", "أوامر", "help") && wordCount <= 4) return true
+        if (containsAny(lower, "اقرأ الشاشة بعمق", "تحليل الشاشة العميق", "اقرأ الصفحة كاملة", "قراءة عميقة للشاشة") && wordCount <= 6) return true
         if (lower in listOf("افحص الشاشة", "محتوى الشاشة", "inspect screen", "scan screen")) return true
         if (containsAny(lower, "واي فاي", "وايفاي", "wifi", "بلوتوث", "bluetooth", "اعدادات", "الإعدادات", "settings") && wordCount <= 4) return true
         if ((lower.startsWith("افتح ") || lower.startsWith("شغل ") || lower.startsWith("open ")) && wordCount <= 3 && !containsAny(lower, "حساب", "موقع", "فيديو", "أغنية", "رسالة", "الكاميرا وصور")) return true
@@ -404,8 +405,21 @@ class MorventCommandEngine(
         }
 
         // ========================================================
-        // 5. SCREEN INSPECTION: "افحص الشاشة", "محتوى الشاشة"
+        // 5. DEEP COMPLEX SCREEN READING & SCREEN INSPECTION
         // ========================================================
+        if (containsAny(lower, "اقرأ الشاشة بعمق", "تحليل الشاشة العميق", "اقرأ الصفحة كاملة", "قراءة عميقة للشاشة")) {
+            if (!MorventAccessibilityService.isRunning) {
+                return createAccessibilityDisabledMessage("قراءة محتوى الشاشة المعقدة بعمق")
+            }
+            val (ok, report) = MorventAccessibilityService.deepReadComplexScreen()
+            return ChatMessage(
+                text = report,
+                isUser = false,
+                status = if (ok) MessageStatus.SUCCESS else MessageStatus.INFO,
+                actionType = ActionType.IN_APP_INSPECT
+            )
+        }
+
         if (containsAny(lower, "افحص الشاشة", "محتوى الشاشة", "ماذا يوجد على الشاشة", "حلل الشاشة", "قراءة الشاشة", "inspect screen", "scan screen")) {
             val report = MorventAccessibilityService.inspectCurrentScreen()
             val logs = listOf(

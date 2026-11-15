@@ -2,6 +2,8 @@ package com.example.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
@@ -41,7 +43,11 @@ data class IndexedUiElement(
     val isScrollable: Boolean,
     val isCheckable: Boolean,
     val isChecked: Boolean,
-    val isFocused: Boolean
+    val isFocused: Boolean,
+    val isEnabled: Boolean = true,
+    val isSelected: Boolean = false,
+    val stateDescription: String = "",
+    val windowType: String = "APP"
 )
 
 data class RichScreenSnapshot(
@@ -51,7 +57,11 @@ data class RichScreenSnapshot(
     val screenHeight: Int = 2400,
     val elements: List<IndexedUiElement> = emptyList(),
     val formattedTree: String = "",
-    val visibleTexts: List<String> = emptyList()
+    val visibleTexts: List<String> = emptyList(),
+    val windowCount: Int = 1,
+    val hasWebView: Boolean = false,
+    val hasSparseTree: Boolean = false,
+    val structuredSummary: String = ""
 )
 
 /**
@@ -71,8 +81,10 @@ class MorventAccessibilityService : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         event ?: return
         val pkg = event.packageName?.toString()
+        val now = System.currentTimeMillis()
         when (event.eventType) {
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> {
+                lastUiMutationTimeMs.set(now)
                 val cls = event.className?.toString()
                 if (!pkg.isNullOrBlank() && pkg != packageName) {
                     _currentForegroundPackage.value = pkg
@@ -80,6 +92,12 @@ class MorventAccessibilityService : AccessibilityService() {
                 if (!cls.isNullOrBlank()) {
                     _currentForegroundActivity.value = cls
                 }
+            }
+            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
+            AccessibilityEvent.TYPE_VIEW_SCROLLED,
+            AccessibilityEvent.TYPE_VIEW_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                lastUiMutationTimeMs.set(now)
             }
             AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED -> {
                 if (!pkg.isNullOrBlank() && pkg != packageName) {
@@ -125,9 +143,46 @@ class MorventAccessibilityService : AccessibilityService() {
         private val indexedBoundsMap = ConcurrentHashMap<Int, Rect>()
         private val recentNotificationsLock = Any()
         private val recentCapturedNotifications = mutableListOf<String>()
+        private val lastUiMutationTimeMs = java.util.concurrent.atomic.AtomicLong(0L)
+
+        @Volatile
+        var fastTurboMode: Boolean = true
 
         val isRunning: Boolean
             get() = serviceRef?.get() != null
+
+        fun currentUiMutationTimestamp(): Long = lastUiMutationTimeMs.get()
+
+        suspend fun waitForUiChangeOrSettle(
+            sinceTimestampMs: Long,
+            minWaitMs: Long = 100L,
+            maxWaitMs: Long = 850L
+        ): Boolean {
+            delay(minWaitMs)
+            val deadline = System.currentTimeMillis() + (maxWaitMs - minWaitMs).coerceAtLeast(0L)
+            var mutated = lastUiMutationTimeMs.get() > sinceTimestampMs
+            while (!mutated && System.currentTimeMillis() < deadline) {
+                delay(45L)
+                if (lastUiMutationTimeMs.get() > sinceTimestampMs) {
+                    mutated = true
+                    delay(90L) // Brief settle after mutation burst
+                    break
+                }
+            }
+            return mutated
+        }
+
+        fun normalizeArabicForMatch(raw: String): String {
+            return raw.trim()
+                .replace(Regex("[\\u064B-\\u065F\\u0670\\u0640]"), "") // Strip Arabic tashkeel & tatweel
+                .replace('أ', 'ا')
+                .replace('إ', 'ا')
+                .replace('آ', 'ا')
+                .replace('ى', 'ي')
+                .replace('ة', 'ه')
+                .replace(Regex("\\s+"), " ")
+                .lowercase(Locale.ROOT)
+        }
 
         fun isServiceEnabled(context: Context): Boolean {
             val expectedServiceName = "${context.packageName}/${MorventAccessibilityService::class.java.canonicalName}"
@@ -290,22 +345,71 @@ class MorventAccessibilityService : AccessibilityService() {
             }
         }
 
+        private fun extractNodeOwnLabel(node: AccessibilityNodeInfo): String {
+            val text = node.text?.toString()?.trim()?.replace("\n", " ").orEmpty()
+            val desc = node.contentDescription?.toString()?.trim()?.replace("\n", " ").orEmpty()
+            val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                node.hintText?.toString()?.trim()?.replace("\n", " ").orEmpty()
+            } else ""
+            val stateDesc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                node.stateDescription?.toString()?.trim()?.replace("\n", " ").orEmpty()
+            } else ""
+
+            val base = when {
+                text.isNotBlank() && desc.isNotBlank() && !text.equals(desc, true) -> "$text ($desc)"
+                text.isNotBlank() -> text
+                desc.isNotBlank() -> desc
+                hint.isNotBlank() -> "[تلميح: $hint]"
+                else -> ""
+            }
+            return if (stateDesc.isNotBlank() && !base.contains(stateDesc, true)) {
+                if (base.isNotBlank()) "$base [$stateDesc]" else stateDesc
+            } else base
+        }
+
+        private fun collectCompositeChildLabels(node: AccessibilityNodeInfo, maxItems: Int = 3, maxDepth: Int = 3): String {
+            val parts = LinkedHashSet<String>()
+            fun walk(cur: AccessibilityNodeInfo?, depth: Int) {
+                if (cur == null || depth > maxDepth || parts.size >= maxItems) return
+                val lbl = extractNodeOwnLabel(cur)
+                if (lbl.isNotBlank() && lbl.length <= 60) {
+                    parts.add(lbl)
+                }
+                for (i in 0 until cur.childCount) {
+                    walk(cur.getChild(i), depth + 1)
+                    if (parts.size >= maxItems) break
+                }
+            }
+            for (i in 0 until node.childCount) {
+                walk(node.getChild(i), 1)
+                if (parts.size >= maxItems) break
+            }
+            return parts.joinToString(" | ")
+        }
+
         fun captureRichScreenSnapshot(): RichScreenSnapshot {
             val service = serviceRef?.get() ?: return RichScreenSnapshot()
             val (screenW, screenH) = getScreenDimensions()
             val ownPackage = service.packageName
 
-            val roots = mutableListOf<AccessibilityNodeInfo>()
+            val windowRoots = mutableListOf<Pair<AccessibilityNodeInfo, String>>()
             try {
                 val allWindows = service.windows
                 if (!allWindows.isNullOrEmpty()) {
-                    for (window in allWindows) {
+                    // Prioritize active/topmost application & dialog windows first
+                    val sortedWindows = allWindows.sortedByDescending { it.layer }
+                    for (window in sortedWindows) {
                         val root = window.root ?: continue
                         val pkg = root.packageName?.toString() ?: ""
-                        // Exclude Morvent's own floating overlay HUD so the agent doesn't click its own bubble
-                        val isOwnOverlay = pkg == ownPackage && window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
+                        val isOwnOverlay = pkg == ownPackage &&
+                            window.type == android.view.accessibility.AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY
                         if (!isOwnOverlay) {
-                            roots.add(root)
+                            val winTag = when (window.type) {
+                                android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM -> "SYSTEM_DIALOG"
+                                android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD -> "KEYBOARD"
+                                else -> "APP"
+                            }
+                            windowRoots.add(root to winTag)
                         }
                     }
                 }
@@ -313,16 +417,17 @@ class MorventAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "Failed reading windows list, using rootInActiveWindow", e)
             }
 
-            if (roots.isEmpty()) {
-                service.rootInActiveWindow?.let { roots.add(it) }
+            if (windowRoots.isEmpty()) {
+                service.rootInActiveWindow?.let { windowRoots.add(it to "APP") }
             }
 
-            if (roots.isEmpty()) {
+            if (windowRoots.isEmpty()) {
                 return RichScreenSnapshot(
                     packageName = _currentForegroundPackage.value,
                     activityName = _currentForegroundActivity.value,
                     screenWidth = screenW,
-                    screenHeight = screenH
+                    screenHeight = screenH,
+                    hasSparseTree = true
                 )
             }
 
@@ -331,25 +436,31 @@ class MorventAccessibilityService : AccessibilityService() {
             val visibleTexts = mutableListOf<String>()
             val treeLines = mutableListOf<String>()
             var nextId = 0
+            val maxIndexedElements = 220
             var detectedPkg = ""
+            var detectedWebView = false
+            var totalTraversed = 0
 
-            fun traverse(node: AccessibilityNodeInfo?, depth: Int) {
-                if (node == null || nextId >= 110) return
-                if (!node.isVisibleToUser) return
+            fun traverse(node: AccessibilityNodeInfo?, depth: Int, winTag: String) {
+                if (node == null || nextId >= maxIndexedElements || depth > 42 || totalTraversed > 950) return
+                totalTraversed++
 
                 val pkg = node.packageName?.toString() ?: ""
-                if (detectedPkg.isBlank() && pkg.isNotBlank() && pkg != ownPackage) {
+                if (detectedPkg.isBlank() && pkg.isNotBlank() && pkg != ownPackage && winTag == "APP") {
                     detectedPkg = pkg
                 }
 
-                val text = node.text?.toString()?.trim()?.replace("\n", " ") ?: ""
-                val hint = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    node.hintText?.toString()?.trim()?.replace("\n", " ") ?: ""
-                } else ""
-                val desc = node.contentDescription?.toString()?.trim()?.replace("\n", " ") ?: ""
+                val clsFull = node.className?.toString() ?: ""
+                val clsShort = clsFull.substringAfterLast('.')
+                if (!detectedWebView && (clsFull.contains("WebView", ignoreCase = true) ||
+                        clsFull.contains("Flutter", ignoreCase = true) ||
+                        clsFull.contains("SurfaceView", ignoreCase = true))
+                ) {
+                    detectedWebView = true
+                }
+
                 val viewIdFull = node.viewIdResourceName ?: ""
                 val shortViewId = viewIdFull.substringAfterLast('/')
-                val clsShort = node.className?.toString()?.substringAfterLast('.') ?: ""
 
                 val rect = Rect()
                 node.getBoundsInScreen(rect)
@@ -357,21 +468,37 @@ class MorventAccessibilityService : AccessibilityService() {
                         rect.right > 0 && rect.bottom > 0 &&
                         rect.left < screenW && rect.top < screenH
 
-                val label = when {
-                    text.isNotBlank() -> text
-                    desc.isNotBlank() -> desc
-                    hint.isNotBlank() -> "[تلميح: $hint]"
-                    else -> ""
-                }
-
-                if (label.isNotBlank()) {
-                    visibleTexts.add(label)
-                }
-
+                val ownLabel = extractNodeOwnLabel(node)
                 val isInteractive = node.isClickable || node.isLongClickable ||
                         node.isEditable || node.isScrollable || node.isCheckable
 
-                if (validBounds && (isInteractive || label.isNotBlank())) {
+                // For clickable/checkable containers without direct text (e.g. list cards, Compose rows, WebView buttons),
+                // aggregate inner text/contentDescription from children cleanly!
+                val label = if (ownLabel.isNotBlank()) {
+                    ownLabel
+                } else if ((node.isClickable || node.isCheckable || node.isLongClickable) && node.childCount in 1..12) {
+                    collectCompositeChildLabels(node, maxItems = 3, maxDepth = 3)
+                } else ""
+
+                if (node.isVisibleToUser && ownLabel.isNotBlank()) {
+                    visibleTexts.add(ownLabel)
+                }
+
+                val stateDesc = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    node.stateDescription?.toString()?.trim().orEmpty()
+                } else ""
+
+                val rangeTag = node.rangeInfo?.let {
+                    if (it.max > it.min) {
+                        val pct = (((it.current - it.min) / (it.max - it.min)) * 100f).toInt().coerceIn(0, 100)
+                        "$pct%"
+                    } else ""
+                }.orEmpty()
+
+                val shouldIndex = validBounds && (node.isVisibleToUser || isInteractive) &&
+                        (isInteractive || ownLabel.isNotBlank())
+
+                if (shouldIndex) {
                     val normX = ((rect.centerX().toFloat() / screenW) * 1000f).toInt().coerceIn(0, 1000)
                     val normY = ((rect.centerY().toFloat() / screenH) * 1000f).toInt().coerceIn(0, 1000)
                     val id = nextId++
@@ -390,38 +517,56 @@ class MorventAccessibilityService : AccessibilityService() {
                         isScrollable = node.isScrollable,
                         isCheckable = node.isCheckable,
                         isChecked = node.isChecked,
-                        isFocused = node.isFocused
+                        isFocused = node.isFocused,
+                        isEnabled = node.isEnabled,
+                        isSelected = node.isSelected,
+                        stateDescription = stateDesc,
+                        windowType = winTag
                     )
                     elements.add(el)
 
                     val flags = buildList {
+                        if (winTag != "APP") add(winTag)
+                        if (!node.isEnabled) add("DISABLED")
                         if (node.isClickable) add("CLICK")
+                        if (node.isLongClickable) add("LONG")
                         if (node.isEditable) add("EDIT")
                         if (node.isScrollable) add("SCROLL")
+                        if (node.isSelected) add("SELECTED")
                         if (node.isCheckable) add(if (node.isChecked) "CHECKED" else "UNCHECKED")
                         if (node.isFocused) add("FOCUSED")
+                        if (rangeTag.isNotBlank()) add("VAL:$rangeTag")
                     }.joinToString(",")
 
                     val idTag = if (shortViewId.isNotBlank()) " #$shortViewId" else ""
-                    val labelTag = if (label.isNotBlank()) " \"$label\"" else ""
+                    val labelTag = if (label.isNotBlank()) " \"${label.take(80)}\"" else ""
                     val flagsTag = if (flags.isNotBlank()) " [$flags]" else ""
                     treeLines.add("[$id] $clsShort$idTag$labelTag$flagsTag @($normX,$normY)")
                 }
 
                 for (i in 0 until node.childCount) {
-                    traverse(node.getChild(i), depth + 1)
-                    if (nextId >= 110) break
+                    traverse(node.getChild(i), depth + 1, winTag)
+                    if (nextId >= maxIndexedElements) break
                 }
             }
 
-            for (root in roots) {
-                traverse(root, 0)
+            for ((root, winTag) in windowRoots) {
+                traverse(root, 0, winTag)
             }
 
             val finalPkg = detectedPkg.ifBlank {
                 _currentForegroundPackage.value.ifBlank {
-                    roots.firstOrNull()?.packageName?.toString() ?: ""
+                    windowRoots.firstOrNull()?.first?.packageName?.toString() ?: ""
                 }
+            }
+            val uniqueTexts = visibleTexts.distinct().take(80)
+            val isSparse = elements.size < 5 || detectedWebView
+
+            val summary = buildString {
+                append("التطبيق: ${finalPkg.ifBlank { "غير محدد" }}")
+                append(" | العناصر التفاعلية: ${elements.count { it.isClickable || it.isEditable }}")
+                append(" | حقول الإدخال: ${elements.count { it.isEditable }}")
+                if (detectedWebView) append(" | محتوى ويب/مرسوم معقد (WebView/Canvas)")
             }
 
             return RichScreenSnapshot(
@@ -431,8 +576,81 @@ class MorventAccessibilityService : AccessibilityService() {
                 screenHeight = screenH,
                 elements = elements,
                 formattedTree = treeLines.joinToString("\n"),
-                visibleTexts = visibleTexts.distinct().take(40)
+                visibleTexts = uniqueTexts,
+                windowCount = windowRoots.size,
+                hasWebView = detectedWebView,
+                hasSparseTree = isSparse,
+                structuredSummary = summary
             )
+        }
+
+        suspend fun deepReadComplexScreen(maxScrolls: Int = 3): Pair<Boolean, String> {
+            if (serviceRef?.get() == null) {
+                return Pair(false, "خدمة إمكانية الوصول غير مفعلة لقراءة الشاشة المعقدة")
+            }
+            val collectedTexts = LinkedHashSet<String>()
+            var lastSnap = captureRichScreenSnapshot()
+            lastSnap.visibleTexts.forEach { collectedTexts.add(it) }
+
+            val interactiveButtons = LinkedHashSet<String>()
+            val editableFields = LinkedHashSet<String>()
+            val switchesState = LinkedHashSet<String>()
+
+            fun collectInteractiveStats(snap: RichScreenSnapshot) {
+                for (el in snap.elements) {
+                    if (el.label.isBlank()) continue
+                    when {
+                        el.isCheckable -> switchesState.add("${el.label}: ${if (el.isChecked) "مفعّل ✓" else "معطّل"}")
+                        el.isEditable -> editableFields.add(el.label)
+                        el.isClickable -> interactiveButtons.add(el.label.take(45))
+                    }
+                }
+            }
+            collectInteractiveStats(lastSnap)
+
+            val hasScrollable = lastSnap.elements.any { it.isScrollable }
+            var pagesRead = 1
+            if (hasScrollable && maxScrolls > 0) {
+                var prevSig = lastSnap.visibleTexts.joinToString("|")
+                for (i in 0 until maxScrolls) {
+                    val scrolled = scrollScreen(true).first
+                    if (!scrolled) break
+                    delay(260L)
+                    val nextSnap = captureRichScreenSnapshot()
+                    val newSig = nextSnap.visibleTexts.joinToString("|")
+                    if (newSig == prevSig) break
+                    prevSig = newSig
+                    pagesRead++
+                    nextSnap.visibleTexts.forEach { collectedTexts.add(it) }
+                    collectInteractiveStats(nextSnap)
+                    lastSnap = nextSnap
+                }
+            }
+
+            if (collectedTexts.isEmpty() && lastSnap.elements.isEmpty()) {
+                return Pair(false, "الشاشة الحالية لا تحتوي على نصوص مقروءة مباشرة (تعمل كواجهة رسومية كاملة).")
+            }
+
+            val report = buildString {
+                appendLine("📖 **القراءة العميقة للشاشة المعقدة** (${lastSnap.packageName.ifBlank { "التطبيق الحالي" }} • $pagesRead صفحات):")
+                if (switchesState.isNotEmpty()) {
+                    appendLine("• **حالة المفاتيح والخيارات:** " + switchesState.take(8).joinToString(" | "))
+                }
+                if (editableFields.isNotEmpty()) {
+                    appendLine("• **حقول الإدخال:** " + editableFields.take(6).joinToString(" | "))
+                }
+                if (interactiveButtons.isNotEmpty()) {
+                    appendLine("• **أبرز الأزرار والعناصر التفاعلية:** " + interactiveButtons.take(12).joinToString(" • "))
+                }
+                if (collectedTexts.isNotEmpty()) {
+                    appendLine("\n📝 **المحتوى النصي المقروء:**")
+                    collectedTexts.take(45).forEach { line ->
+                        appendLine("– $line")
+                    }
+                }
+            }.trim()
+
+            return Pair(true, report)
         }
 
         fun inspectCurrentScreen(): ScreenInspectionReport {
@@ -453,12 +671,12 @@ class MorventAccessibilityService : AccessibilityService() {
                 .filter { (it.isClickable || it.className.contains("Button", ignoreCase = true)) && it.label.isNotBlank() }
                 .map { it.label }
                 .distinct()
-                .take(15)
+                .take(20)
             val inputFields = rich.elements
                 .filter { it.isEditable || it.className.contains("EditText", ignoreCase = true) }
                 .map { it.label.ifBlank { it.viewId.ifBlank { "حقل إدخال" } } }
                 .distinct()
-                .take(10)
+                .take(12)
 
             return ScreenInspectionReport(
                 packageName = rich.packageName,
@@ -479,13 +697,24 @@ class MorventAccessibilityService : AccessibilityService() {
             val rect = indexedBoundsMap[elementId]
             if (rect != null && rect.width() > 0 && rect.height() > 0) {
                 val roots = getAllActiveWindowRoots(service)
-                var matchedNode: AccessibilityNodeInfo? = null
+                var exactNode: AccessibilityNodeInfo? = null
+                var clickableAncestor: AccessibilityNodeInfo? = null
                 val nodeRect = Rect()
                 fun findAtRect(node: AccessibilityNodeInfo?) {
-                    if (node == null || matchedNode != null) return
+                    if (node == null || exactNode != null) return
                     node.getBoundsInScreen(nodeRect)
-                    if (nodeRect == rect && node.isClickable) {
-                        matchedNode = node
+                    if (nodeRect == rect) {
+                        exactNode = node
+                        var anc: AccessibilityNodeInfo? = node
+                        var hop = 0
+                        while (anc != null && hop < 4) {
+                            if (anc.isClickable && anc.isEnabled) {
+                                clickableAncestor = anc
+                                break
+                            }
+                            anc = anc.parent
+                            hop++
+                        }
                         return
                     }
                     for (i in 0 until node.childCount) {
@@ -494,16 +723,26 @@ class MorventAccessibilityService : AccessibilityService() {
                 }
                 for (root in roots) {
                     findAtRect(root)
-                    if (matchedNode != null) break
+                    if (exactNode != null) break
                 }
 
-                if (matchedNode?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) {
+                // Check sibling switch/checkbox if matched row contains one
+                exactNode?.let { matched ->
+                    val siblingToggle = findCheckableInAncestors(matched)
+                    if (siblingToggle != null && siblingToggle.isEnabled && siblingToggle.isClickable) {
+                        if (siblingToggle.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                            return Pair(true, "تم تبديل الخيار [$elementId] بنجاح ✓")
+                        }
+                    }
+                }
+
+                if (clickableAncestor?.performAction(AccessibilityNodeInfo.ACTION_CLICK) == true) {
                     return Pair(true, "تم النقر على العنصر [$elementId] بنجاح")
                 }
 
                 val tapped = performHumanTap(rect.centerX().toFloat(), rect.centerY().toFloat())
                 if (tapped) {
-                    return Pair(true, "تم النقر البشري على العنصر [$elementId] عند (${rect.centerX()}, ${rect.centerY()})")
+                    return Pair(true, "تم النقر البشري الذكي على العنصر [$elementId] عند (${rect.centerX()}, ${rect.centerY()})")
                 }
             }
             return Pair(false, "تعذر العثور على العنصر [$elementId]")
@@ -520,7 +759,16 @@ class MorventAccessibilityService : AccessibilityService() {
             }
         }
 
-        fun clickElementByText(query: String): Pair<Boolean, String> {
+        private data class ScoredNodeCandidate(
+            val node: AccessibilityNodeInfo,
+            val score: Int,
+            val bounds: Rect,
+            val label: String
+        )
+
+        fun clickElementByText(query: String): Pair<Boolean, String> = clickElementSmart(query)
+
+        fun clickElementSmart(query: String): Pair<Boolean, String> {
             val service = serviceRef?.get()
                 ?: return Pair(false, "خدمة إمكانية الوصول غير مفعلة")
             val roots = getAllActiveWindowRoots(service)
@@ -528,62 +776,183 @@ class MorventAccessibilityService : AccessibilityService() {
                 return Pair(false, "تعذر قراءة محتوى الشاشة النشطة")
             }
 
-            val cleanQuery = query.trim().lowercase(Locale.ROOT)
-            var targetNode: AccessibilityNodeInfo? = null
+            val rawClean = query.trim().lowercase(Locale.ROOT)
+            val normQuery = normalizeArabicForMatch(query)
+            if (normQuery.isBlank() && rawClean.isBlank()) {
+                return Pair(false, "لم يتم تحديد نص العنصر المطلوب")
+            }
+            val candidates = mutableListOf<ScoredNodeCandidate>()
+            val wordBoundaryRegex = runCatching {
+                Regex("(^|\\s)${Regex.escape(normQuery)}(\\s|$)")
+            }.getOrNull()
 
-            fun findMatchingNode(node: AccessibilityNodeInfo?) {
-                if (node == null || targetNode != null) return
-                val text = node.text?.toString()?.lowercase(Locale.ROOT) ?: ""
-                val desc = node.contentDescription?.toString()?.lowercase(Locale.ROOT) ?: ""
-                val id = node.viewIdResourceName?.lowercase(Locale.ROOT) ?: ""
+            fun scoreNode(node: AccessibilityNodeInfo?, winIdx: Int, depth: Int) {
+                if (node == null || depth > 42) return
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
 
-                if (text.contains(cleanQuery) || desc.contains(cleanQuery) || id.contains(cleanQuery)) {
-                    targetNode = node
-                    return
+                if (node.isVisibleToUser && rect.width() > 2 && rect.height() > 2) {
+                    val ownRaw = extractNodeOwnLabel(node)
+                    val ownNorm = normalizeArabicForMatch(ownRaw)
+                    val idRaw = (node.viewIdResourceName ?: "").substringAfterLast('/').lowercase(Locale.ROOT)
+                    val hintNorm = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        normalizeArabicForMatch(node.hintText?.toString() ?: "")
+                    } else ""
+
+                    var score = 0
+                    when {
+                        ownRaw.lowercase(Locale.ROOT) == rawClean && rawClean.isNotEmpty() -> score += 100
+                        ownNorm == normQuery && normQuery.isNotEmpty() -> score += 85
+                        ownNorm.startsWith(normQuery) && normQuery.isNotEmpty() -> score += 60
+                        normQuery.isNotEmpty() && wordBoundaryRegex?.containsMatchIn(ownNorm) == true -> score += 45
+                        normQuery.isNotEmpty() && ownNorm.contains(normQuery) -> score += 30
+                        normQuery.isNotEmpty() && hintNorm.contains(normQuery) -> score += 26
+                        rawClean.isNotEmpty() && idRaw.contains(rawClean) -> score += 22
+                    }
+
+                    if (score > 0) {
+                        score += if (node.isEnabled) 30 else -80
+                        val hasClickableAnc = run {
+                            var anc: AccessibilityNodeInfo? = node
+                            var hop = 0
+                            var ok = false
+                            while (anc != null && hop < 4) {
+                                if (anc.isClickable) {
+                                    ok = true
+                                    break
+                                }
+                                anc = anc.parent
+                                hop++
+                            }
+                            ok
+                        }
+                        if (hasClickableAnc) score += 50
+                        if (node.isEditable) score += 20
+                        if (winIdx == 0) score += 25 // Frontmost popup/dialog/active window priority
+                        if (findCheckableInAncestors(node) != null) score += 40
+                        if (rect.width() >= 20 && rect.height() >= 20) score += 20
+
+                        candidates.add(
+                            ScoredNodeCandidate(
+                                node = node,
+                                score = score,
+                                bounds = rect,
+                                label = ownRaw.ifBlank { idRaw.ifBlank { query } }
+                            )
+                        )
+                    }
                 }
 
                 for (i in 0 until node.childCount) {
-                    findMatchingNode(node.getChild(i))
-                    if (targetNode != null) return
+                    scoreNode(node.getChild(i), winIdx, depth + 1)
                 }
             }
 
-            for (root in roots) {
-                findMatchingNode(root)
-                if (targetNode != null) break
+            roots.forEachIndexed { winIdx, root ->
+                scoreNode(root, winIdx, 0)
             }
 
-            val matched = targetNode
-                ?: return Pair(false, "لم يتم العثور على عنصر بالشاشة يحتوي على '$query'")
+            if (candidates.isEmpty()) {
+                return Pair(false, "لم يتم العثور على عنصر بالشاشة يطابق '$query'")
+            }
 
-            // If query matches a Settings row label with a sibling Switch/CheckBox inside the same container, toggle it
-            val siblingToggle = findCheckableInAncestors(matched)
-            if (siblingToggle != null && siblingToggle.isClickable) {
-                if (siblingToggle.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                    return Pair(true, "تم تبديل خيار '$query' بنجاح ✓")
+            val topCandidates = candidates.sortedByDescending { it.score }.take(3)
+            for (cand in topCandidates) {
+                val matched = cand.node
+
+                // Tier 1: Sibling Switch/CheckBox inside same settings/card row
+                val siblingToggle = findCheckableInAncestors(matched)
+                if (siblingToggle != null && siblingToggle.isEnabled && siblingToggle.isClickable) {
+                    if (siblingToggle.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                        return Pair(true, "تم تبديل خيار '${cand.label.take(40)}' بنجاح ✓")
+                    }
                 }
-            }
 
-            var clickTarget: AccessibilityNodeInfo? = matched
-            while (clickTarget != null && !clickTarget.isClickable) {
-                clickTarget = clickTarget.parent
-            }
+                // Tier 2: Nearest enabled clickable ancestor
+                var clickTarget: AccessibilityNodeInfo? = matched
+                while (clickTarget != null && !clickTarget.isClickable) {
+                    clickTarget = clickTarget.parent
+                }
+                if (clickTarget != null && clickTarget.isClickable && clickTarget.isEnabled) {
+                    if (clickTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
+                        return Pair(true, "تم النقر على '${cand.label.take(40)}' بنجاح ✓")
+                    }
+                }
 
-            if (clickTarget != null && clickTarget.isClickable) {
-                val ok = clickTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                if (ok) return Pair(true, "تم النقر على '$query' بنجاح")
-            }
-
-            val rect = Rect()
-            matched.getBoundsInScreen(rect)
-            if (rect.width() > 0 && rect.height() > 0) {
-                val tapped = dispatchTapGesture(rect.centerX().toFloat(), rect.centerY().toFloat())
-                if (tapped) {
-                    return Pair(true, "تم النقر بإيماءة اللمس على '$query' عند الإحداثيات (${rect.centerX()}, ${rect.centerY()})")
+                // Tier 3: Hardware gesture tap directly on bounding box center (works for WebView, Flutter, Canvas, custom views)
+                if (cand.bounds.width() > 0 && cand.bounds.height() > 0) {
+                    val tapped = dispatchTapGesture(cand.bounds.centerX().toFloat(), cand.bounds.centerY().toFloat())
+                    if (tapped) {
+                        return Pair(
+                            true,
+                            "تم النقر بإيماءة اللمس الذكية على '${cand.label.take(40)}' عند (${cand.bounds.centerX()}, ${cand.bounds.centerY()})"
+                        )
+                    }
                 }
             }
 
             return Pair(false, "تعذر تنفيذ النقر على '$query'")
+        }
+
+        suspend fun findAndClickSmart(query: String, maxScrolls: Int = 5): Pair<Boolean, String> {
+            if (serviceRef?.get() == null) {
+                return Pair(false, "خدمة إمكانية الوصول غير مفعلة")
+            }
+            val queries = query.split("|").map { it.trim() }.filter { it.isNotEmpty() }
+            if (queries.isEmpty()) return Pair(false, "لم يتم تحديد العنصر المطلوب")
+
+            var prevSignature = ""
+            for (attempt in 0..maxScrolls) {
+                for (q in queries) {
+                    val res = clickElementSmart(q)
+                    if (res.first) return res
+                }
+                if (attempt == maxScrolls) break
+
+                val snap = captureRichScreenSnapshot()
+                val curSig = snap.visibleTexts.joinToString("|")
+                if (attempt > 0 && curSig == prevSignature) {
+                    break // Reached bottom / scrollable end cleanly without wasted loops
+                }
+                prevSignature = curSig
+
+                val tsBefore = currentUiMutationTimestamp()
+                val scrolled = scrollScreen(true).first
+                if (!scrolled) break
+                waitForUiChangeOrSettle(tsBefore, minWaitMs = if (fastTurboMode) 110L else 240L, maxWaitMs = 450L)
+            }
+            return Pair(false, "لم يتم العثور على '$query' بعد البحث والتمرير الذكي")
+        }
+
+        fun clickRelativeToLabel(anchorText: String, directionOrType: String = "next"): Pair<Boolean, String> {
+            val service = serviceRef?.get()
+                ?: return Pair(false, "خدمة إمكانية الوصول غير مفعلة")
+            val snap = captureRichScreenSnapshot()
+            val normAnchor = normalizeArabicForMatch(anchorText)
+            val anchorEl = snap.elements.firstOrNull {
+                val n = normalizeArabicForMatch(it.label)
+                n == normAnchor || n.contains(normAnchor)
+            } ?: return Pair(false, "لم يتم العثور على النص المرجعي '$anchorText'")
+
+            val interactiveCandidates = snap.elements.filter {
+                it.id != anchorEl.id && (it.isClickable || it.isCheckable || it.isEditable) && it.isEnabled
+            }
+            val dir = directionOrType.lowercase(Locale.ROOT)
+            val matchingDir = interactiveCandidates.filter { cand ->
+                when (dir) {
+                    "below", "under", "تحت" -> cand.bounds.centerY() > anchorEl.bounds.bottom - 10
+                    "above", "فوق" -> cand.bounds.centerY() < anchorEl.bounds.top + 10
+                    else -> kotlin.math.abs(cand.bounds.centerY() - anchorEl.bounds.centerY()) <= (anchorEl.bounds.height() + 90)
+                }
+            }.ifEmpty { interactiveCandidates }
+
+            val nearest = matchingDir.minByOrNull { cand ->
+                val dx = (cand.bounds.centerX() - anchorEl.bounds.centerX()).toLong()
+                val dy = (cand.bounds.centerY() - anchorEl.bounds.centerY()).toLong()
+                dx * dx + dy * dy
+            } ?: return Pair(false, "لم يتم العثور على عنصر تفاعلي مجاور لـ '$anchorText'")
+
+            return clickElementById(nearest.id)
         }
 
         private fun findCheckableInAncestors(node: AccessibilityNodeInfo): AccessibilityNodeInfo? {
@@ -756,6 +1125,44 @@ class MorventAccessibilityService : AccessibilityService() {
         // ========================================================
         // 4. IN-APP & SYSTEM-WIDE TEXT TYPING & IME SUBMISSION
         // ========================================================
+        private fun setTextWithClipboardFallback(
+            service: MorventAccessibilityService,
+            editNode: AccessibilityNodeInfo,
+            textToType: String,
+            submitEnter: Boolean
+        ): Boolean {
+            editNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            editNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            val args = Bundle().apply {
+                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, textToType)
+            }
+            var success = editNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+
+            if (!success && textToType.isNotEmpty()) {
+                // Fallback for custom Canvas/WebView/Flutter inputs: select existing text + ClipboardManager paste
+                runCatching {
+                    val clipboard = service.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                    if (clipboard != null) {
+                        clipboard.setPrimaryClip(ClipData.newPlainText("MorventInput", textToType))
+                        val existingLen = editNode.text?.length ?: 0
+                        if (existingLen > 0) {
+                            val selArgs = Bundle().apply {
+                                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, 0)
+                                putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, existingLen)
+                            }
+                            editNode.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, selArgs)
+                        }
+                        success = editNode.performAction(AccessibilityNodeInfo.ACTION_PASTE)
+                    }
+                }
+            }
+
+            if (success && submitEnter && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                editNode.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
+            }
+            return success
+        }
+
         fun typeTextIntoElementById(elementId: Int?, textToType: String, submitEnter: Boolean = false): Pair<Boolean, String> {
             val service = serviceRef?.get()
                 ?: return Pair(false, "خدمة الوصول غير مفعلة")
@@ -777,7 +1184,7 @@ class MorventAccessibilityService : AccessibilityService() {
             fun findBestEditable(node: AccessibilityNodeInfo?, requireFocused: Boolean, matchRect: Rect?) {
                 if (node == null || targetNode != null) return
                 val isEdit = node.isEditable || node.className?.toString()?.contains("EditText", ignoreCase = true) == true
-                if (isEdit) {
+                if (isEdit && node.isEnabled) {
                     val r = Rect()
                     node.getBoundsInScreen(r)
                     val rectMatches = matchRect == null || r == matchRect || r.contains(matchRect.centerX(), matchRect.centerY())
@@ -812,15 +1219,7 @@ class MorventAccessibilityService : AccessibilityService() {
             val editNode = targetNode
                 ?: return Pair(false, "لم يتم العثور على حقل إدخال نشط على الشاشة")
 
-            editNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-            val args = Bundle().apply {
-                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, textToType)
-            }
-            val success = editNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
-
-            if (success && submitEnter && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                editNode.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_IME_ENTER.id)
-            }
+            val success = setTextWithClipboardFallback(service, editNode, textToType, submitEnter)
 
             return if (success) {
                 Pair(true, "تمت كتابة '$textToType' في الحقل بنجاح")
@@ -836,60 +1235,96 @@ class MorventAccessibilityService : AccessibilityService() {
             }
         }
 
-        fun typeTextIntoField(targetField: String?, textToType: String): Pair<Boolean, String> {
+        fun typeTextIntoField(targetField: String?, textToType: String, submitEnter: Boolean = false): Pair<Boolean, String> {
             val service = serviceRef?.get()
                 ?: return Pair(false, "خدمة الوصول غير مفعلة")
             val roots = getAllActiveWindowRoots(service)
             if (roots.isEmpty()) return Pair(false, "تعذر قراءة نافذة التطبيق النشطة")
 
+            val normTarget = normalizeArabicForMatch(targetField ?: "")
             var targetNode: AccessibilityNodeInfo? = null
+            val editNodes = mutableListOf<Pair<AccessibilityNodeInfo, Rect>>()
+            val labelNodes = mutableListOf<Pair<String, Rect>>()
 
-            fun findEditable(node: AccessibilityNodeInfo?) {
-                if (node == null || targetNode != null) return
+            fun collectNodes(node: AccessibilityNodeInfo?) {
+                if (node == null) return
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
                 val isEdit = node.isEditable || node.className?.toString()?.contains("EditText", ignoreCase = true) == true
-                if (isEdit) {
-                    if (targetField.isNullOrBlank()) {
-                        targetNode = node
-                        return
-                    } else {
-                        val text = node.text?.toString() ?: ""
-                        val desc = node.contentDescription?.toString() ?: ""
-                        val id = node.viewIdResourceName ?: ""
-                        if (text.contains(targetField, ignoreCase = true) ||
-                            desc.contains(targetField, ignoreCase = true) ||
-                            id.contains(targetField, ignoreCase = true)
-                        ) {
+                if (isEdit && node.isEnabled) {
+                    editNodes.add(node to rect)
+                    if (normTarget.isNotEmpty()) {
+                        val own = normalizeArabicForMatch(extractNodeOwnLabel(node))
+                        val id = (node.viewIdResourceName ?: "").lowercase(Locale.ROOT)
+                        if (own.contains(normTarget) || id.contains(normTarget)) {
                             targetNode = node
                             return
                         }
                     }
+                } else {
+                    val txt = normalizeArabicForMatch(extractNodeOwnLabel(node))
+                    if (txt.isNotBlank() && node.isVisibleToUser) {
+                        labelNodes.add(txt to rect)
+                    }
                 }
-
                 for (i in 0 until node.childCount) {
-                    findEditable(node.getChild(i))
+                    collectNodes(node.getChild(i))
                     if (targetNode != null) return
                 }
             }
 
             for (root in roots) {
-                findEditable(root)
+                collectNodes(root)
                 if (targetNode != null) break
             }
 
+            // Spatial matching: find EditText directly below/next to a matching TextView label
+            if (targetNode == null && normTarget.isNotEmpty() && editNodes.isNotEmpty()) {
+                val matchedLabelRect = labelNodes.firstOrNull { it.first.contains(normTarget) }?.second
+                if (matchedLabelRect != null) {
+                    targetNode = editNodes.minByOrNull { (_, r) ->
+                        val dx = (r.centerX() - matchedLabelRect.centerX()).toLong()
+                        val dy = (r.centerY() - matchedLabelRect.centerY()).toLong()
+                        dx * dx + dy * dy
+                    }?.first
+                }
+            }
+
             val editNode = targetNode
+                ?: editNodes.firstOrNull { it.first.isFocused }?.first
+                ?: editNodes.firstOrNull()?.first
                 ?: return Pair(false, "لم يتم العثور على حقل إدخال نشط على الشاشة")
 
-            editNode.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
-            val args = Bundle().apply {
-                putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, textToType)
-            }
-            val success = editNode.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            val success = setTextWithClipboardFallback(service, editNode, textToType, submitEnter)
 
             return if (success) {
                 Pair(true, "تمت كتابة '$textToType' في الحقل بنجاح")
             } else {
                 Pair(false, "تعذر إدخال النص في الحقل المطلوب")
             }
+        }
+
+        suspend fun smartTypeAndSubmit(
+            targetField: String?,
+            textToType: String,
+            submit: Boolean = true
+        ): Pair<Boolean, String> {
+            val tsBefore = currentUiMutationTimestamp()
+            val typed = typeTextIntoField(targetField, textToType, submitEnter = submit)
+            if (!typed.first) return typed
+            if (!submit) return typed
+
+            val mutatedByIme = waitForUiChangeOrSettle(tsBefore, minWaitMs = 90L, maxWaitMs = 220L)
+            if (!mutatedByIme) {
+                val submitKeywords = listOf("إرسال", "ارسال", "بحث", "Send", "Search", "Go", "تم", "Done", "Submit")
+                for (kw in submitKeywords) {
+                    val res = clickElementSmart(kw)
+                    if (res.first) {
+                        return Pair(true, "تمت كتابة '$textToType' وتأكيد الإرسال عبر '$kw' ✓")
+                    }
+                }
+            }
+            return typed
         }
 
         // ========================================================
@@ -932,7 +1367,7 @@ class MorventAccessibilityService : AccessibilityService() {
             val startY = if (forward) height * 0.75f else height * 0.25f
             val endY = if (forward) height * 0.25f else height * 0.75f
 
-            val gestured = dispatchSwipeGesture(startX, startY, startX, endY, 340)
+            val gestured = dispatchSwipeGesture(startX, startY, startX, endY, if (fastTurboMode) 220L else 340L)
             return if (gestured) {
                 Pair(true, if (forward) "تم التمرير لأسفل بإيماءة السحب" else "تم التمرير لأعلى بإيماءة السحب")
             } else {
@@ -961,16 +1396,16 @@ class MorventAccessibilityService : AccessibilityService() {
             val service = serviceRef?.get() ?: return false
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
 
-            val jitterX = ((-3..3).random()).toFloat()
-            val jitterY = ((-3..3).random()).toFloat()
+            val jitterX = ((-2..2).random()).toFloat()
+            val jitterY = ((-2..2).random()).toFloat()
             val tapX = (x + jitterX).coerceAtLeast(1f)
             val tapY = (y + jitterY).coerceAtLeast(1f)
 
             val path = Path().apply {
                 moveTo(tapX, tapY)
-                lineTo(tapX + 0.6f, tapY + 0.9f)
+                lineTo(tapX + 0.5f, tapY + 0.7f)
             }
-            val duration = (75L..120L).random()
+            val duration = if (fastTurboMode) (45L..68L).random() else (75L..115L).random()
             val stroke = GestureDescription.StrokeDescription(path, 0, duration)
             val gesture = GestureDescription.Builder().addStroke(stroke).build()
             return service.dispatchGesture(gesture, null, null)
@@ -987,8 +1422,10 @@ class MorventAccessibilityService : AccessibilityService() {
 
             val p1 = Path().apply { moveTo(x, y); lineTo(x + 0.5f, y + 0.5f) }
             val p2 = Path().apply { moveTo(x + 1f, y - 1f); lineTo(x + 1.5f, y - 0.5f) }
-            val stroke1 = GestureDescription.StrokeDescription(p1, 0, 75L)
-            val stroke2 = GestureDescription.StrokeDescription(p2, 145L, 75L)
+            val tapDur = if (fastTurboMode) 50L else 75L
+            val gapStart = if (fastTurboMode) 105L else 145L
+            val stroke1 = GestureDescription.StrokeDescription(p1, 0, tapDur)
+            val stroke2 = GestureDescription.StrokeDescription(p2, gapStart, tapDur)
             val gesture = GestureDescription.Builder().addStroke(stroke1).addStroke(stroke2).build()
             return service.dispatchGesture(gesture, null, null)
         }
@@ -1108,7 +1545,7 @@ class MorventAccessibilityService : AccessibilityService() {
             val endX = if (toRight) width * 0.8f else width * 0.2f
             val y = height * 0.5f
 
-            val ok = dispatchSwipeGesture(startX, y, endX, y, 360L)
+            val ok = dispatchSwipeGesture(startX, y, endX, y, if (fastTurboMode) 210L else 340L)
             return if (ok) {
                 Pair(true, if (toRight) "تم السحب لليمين 👉" else "تم السحب لليسار 👈")
             } else {
@@ -1116,17 +1553,18 @@ class MorventAccessibilityService : AccessibilityService() {
             }
         }
 
-        fun dispatchSwipeGesture(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 380): Boolean {
+        fun dispatchSwipeGesture(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long = 260): Boolean {
             val service = serviceRef?.get() ?: return false
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false
 
+            val effectiveDuration = if (fastTurboMode) durationMs.coerceIn(140L, 280L) else durationMs.coerceIn(220L, 900L)
             val path = Path().apply {
                 moveTo(startX, startY)
                 val midX = (startX + endX) / 2f + (if (startX < endX) 18f else -18f)
                 val midY = (startY + endY) / 2f + ((-12..12).random()).toFloat()
                 quadTo(midX, midY, endX, endY)
             }
-            val stroke = GestureDescription.StrokeDescription(path, 0, durationMs)
+            val stroke = GestureDescription.StrokeDescription(path, 0, effectiveDuration)
             val gesture = GestureDescription.Builder().addStroke(stroke).build()
             return service.dispatchGesture(gesture, null, null)
         }

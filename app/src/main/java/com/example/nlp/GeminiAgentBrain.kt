@@ -33,6 +33,7 @@ enum class AgentActionKind {
     DOUBLE_TAP,
     LONG_PRESS_ELEMENT,
     LONG_PRESS_COORDINATES,
+    SMART_FIND_CLICK,
     TYPE_TEXT,
     SCROLL_DOWN,
     SCROLL_UP,
@@ -48,6 +49,7 @@ enum class AgentActionKind {
     MEDIA_CONTROL,
     DEVICE_CONTROL,
     READ_SCREEN,
+    DEEP_READ_SCREEN,
     WAIT,
     ASK_USER,
     DONE
@@ -66,7 +68,8 @@ data class AgentDecision(
     val submitEnter: Boolean = false,
     val target: String = "",
     val waitMs: Long = 1000L,
-    val finalResponse: String = ""
+    val finalResponse: String = "",
+    val steps: List<AgentDecision> = emptyList()
 )
 
 data class ChatTurn(
@@ -111,11 +114,34 @@ class GeminiAgentBrain(context: Context? = null) {
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(35, TimeUnit.SECONDS)
-            .writeTimeout(25, TimeUnit.SECONDS)
-            .callTimeout(40, TimeUnit.SECONDS)
+            .connectTimeout(12, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .writeTimeout(15, TimeUnit.SECONDS)
+            .callTimeout(25, TimeUnit.SECONDS)
             .build()
+    }
+
+    private val subStepSchema by lazy {
+        Schema.obj(
+            properties = mapOf(
+                "action" to Schema.enumeration(
+                    values = AgentActionKind.entries.map { it.name },
+                    description = "Sub-step action kind."
+                ),
+                "elementId" to Schema.integer(description = "UI tree [id] if known.", nullable = true),
+                "x" to Schema.integer(description = "Normalized X 0..1000.", nullable = true),
+                "y" to Schema.integer(description = "Normalized Y 0..1000.", nullable = true),
+                "endX" to Schema.integer(description = "End normalized X 0..1000.", nullable = true),
+                "endY" to Schema.integer(description = "End normalized Y 0..1000.", nullable = true),
+                "text" to Schema.string(description = "Text to type.", nullable = true),
+                "submitEnter" to Schema.boolean(description = "Press Enter/Search after typing.", nullable = true),
+                "target" to Schema.string(description = "Text query for SMART_FIND_CLICK or target argument.", nullable = true),
+                "waitMs" to Schema.integer(description = "Delay milliseconds.", nullable = true)
+            ),
+            optionalProperties = listOf(
+                "elementId", "x", "y", "endX", "endY", "text", "submitEnter", "target", "waitMs"
+            )
+        )
     }
 
     private val decisionSchema by lazy {
@@ -134,13 +160,18 @@ class GeminiAgentBrain(context: Context? = null) {
                 "endY" to Schema.integer(description = "End normalized Y 0..1000 for DRAG.", nullable = true),
                 "text" to Schema.string(description = "Text to type when action is TYPE_TEXT or text to copy.", nullable = true),
                 "submitEnter" to Schema.boolean(description = "Whether to press Enter/Search/Send IME action after typing.", nullable = true),
-                "target" to Schema.string(description = "Target value for LAUNCH_APP, OPEN_URL, OPEN_SETTINGS, GLOBAL_ACTION, MEDIA_CONTROL, or DEVICE_CONTROL.", nullable = true),
-                "waitMs" to Schema.integer(description = "Milliseconds to wait when action is WAIT (500..4000).", nullable = true),
-                "finalResponse" to Schema.string(description = "Clear Arabic message for the user when action is DONE, READ_SCREEN, or ASK_USER.", nullable = true)
+                "target" to Schema.string(description = "Target value for SMART_FIND_CLICK, LAUNCH_APP, OPEN_URL, OPEN_SETTINGS, GLOBAL_ACTION, MEDIA_CONTROL, or DEVICE_CONTROL.", nullable = true),
+                "waitMs" to Schema.integer(description = "Milliseconds to wait when action is WAIT (300..4000).", nullable = true),
+                "finalResponse" to Schema.string(description = "Clear Arabic message for the user when action is DONE, READ_SCREEN, DEEP_READ_SCREEN, or ASK_USER.", nullable = true),
+                "steps" to Schema.array(
+                    items = subStepSchema,
+                    description = "Optional batch of up to 4 deterministic immediate UI actions to execute sequentially in one fast turn (e.g. tap search box + type text + submit).",
+                    nullable = true
+                )
             ),
             optionalProperties = listOf(
                 "elementId", "x", "y", "endX", "endY", "text",
-                "submitEnter", "target", "waitMs", "finalResponse"
+                "submitEnter", "target", "waitMs", "finalResponse", "steps"
             )
         )
     }
@@ -149,7 +180,7 @@ class GeminiAgentBrain(context: Context? = null) {
         generationConfig {
             responseMimeType = "application/json"
             responseSchema = decisionSchema
-            temperature = 0.2f
+            temperature = 0.1f
         }
     }
 
@@ -371,7 +402,7 @@ class GeminiAgentBrain(context: Context? = null) {
         }
 
         val silentRuleSection = if (silentExecutionMode) {
-            "\nوضع التنفيذ الصامت الكامل مفعّل: لا تتوقف أبداً ولا تطلب من المستخدم تنفيذ أي خطوة يدوياً. نفذ عبر DEVICE_CONTROL أو Accessibility Actions مباشرة."
+            "\nوضع التنفيذ الصامت والسرعة الفائقة مفعّل: نفذ فوراً بدون أسئلة، واجمع الخطوات المؤكدة في مصفوفة steps لتنفيذها بسرعة فائقة."
         } else ""
 
         val promptText = buildString {
@@ -381,12 +412,15 @@ class GeminiAgentBrain(context: Context? = null) {
             append(steeringSection)
             append("\nالخطوة الحالية: $stepNumber من $maxSteps")
             append("\nالتطبيق الظاهر حالياً: package=${snapshot.packageName.ifBlank { "unknown" }}, activity=${snapshot.activityName.ifBlank { "unknown" }}")
+            if (snapshot.structuredSummary.isNotBlank()) {
+                append("\nملخص الواجهة: ${snapshot.structuredSummary} | نوافذ=${snapshot.windowCount}")
+            }
             append("\nأبعاد الشاشة: ${snapshot.screenWidth}x${snapshot.screenHeight}")
             append("\nالتطبيقات المثبتة على الهاتف: $installedAppsSummary")
             append(historySection)
             append("\n\nشجرة عناصر الواجهة الحالية (الإحداثيات المطبّعة @x,y من 0 إلى 1000):\n")
             append(uiTreeSection)
-            append("\n\nأرجع كائن JSON فقط يحدد الخطوة الذكية التالية.")
+            append("\n\nأرجع كائن JSON فقط يحدد الخطوة الذكية التالية (أو مصفوفة steps مجمعة لخطوات البحث/الكتابة المؤكدة).")
         }
 
         val apiKey = currentApiKey()
@@ -498,7 +532,7 @@ class GeminiAgentBrain(context: Context? = null) {
                 put(
                     "generationConfig",
                     JSONObject().apply {
-                        put("temperature", if (expectJson) 0.2 else 0.7)
+                        put("temperature", if (expectJson) 0.1 else 0.7)
                         if (expectJson) {
                             put("responseMimeType", "application/json")
                         }
@@ -573,7 +607,7 @@ class GeminiAgentBrain(context: Context? = null) {
         }
     }
 
-    private fun parseDecisionJson(rawText: String): BrainResult {
+    internal fun parseDecisionJson(rawText: String): BrainResult {
         return try {
             val cleaned = rawText
                 .trim()
@@ -588,34 +622,49 @@ class GeminiAgentBrain(context: Context? = null) {
             } else cleaned
 
             val json = JSONObject(jsonSlice)
-            val actionStr = json.optString("action", "WAIT")
-            val actionKind = runCatching { AgentActionKind.valueOf(actionStr) }
-                .getOrDefault(AgentActionKind.WAIT)
+            val rootDecision = parseSingleDecisionObject(json, isRoot = true)
 
-            val elementId = if (json.has("elementId") && !json.isNull("elementId")) {
-                json.optInt("elementId")
-            } else null
+            val subSteps = mutableListOf<AgentDecision>()
+            val stepsArr = json.optJSONArray("steps")
+            if (stepsArr != null) {
+                val limit = minOf(stepsArr.length(), 4)
+                for (i in 0 until limit) {
+                    val item = stepsArr.optJSONObject(i) ?: continue
+                    subSteps.add(parseSingleDecisionObject(item, isRoot = false))
+                }
+            }
 
-            val decision = AgentDecision(
-                action = actionKind,
-                thought = json.optString("thought", "تحليل الشاشة..."),
-                statusLabel = json.optString("statusLabel", "جاري التنفيذ..."),
-                elementId = elementId,
-                x = json.optInt("x", 500).coerceIn(0, 1000),
-                y = json.optInt("y", 500).coerceIn(0, 1000),
-                endX = json.optInt("endX", 500).coerceIn(0, 1000),
-                endY = json.optInt("endY", 500).coerceIn(0, 1000),
-                text = json.optString("text", ""),
-                submitEnter = json.optBoolean("submitEnter", false),
-                target = json.optString("target", ""),
-                waitMs = json.optLong("waitMs", 1000L).coerceIn(300L, 4000L),
-                finalResponse = json.optString("finalResponse", "")
-            )
-            BrainResult.Success(decision)
+            BrainResult.Success(rootDecision.copy(steps = subSteps))
         } catch (e: Exception) {
             Log.w(tag, "Failed to parse Gemini JSON decision: $rawText", e)
             BrainResult.Failure("استجاب النموذج بتنسيق غير متوقع.", isCloudUnavailable = true)
         }
+    }
+
+    private fun parseSingleDecisionObject(json: JSONObject, isRoot: Boolean): AgentDecision {
+        val actionStr = json.optString("action", "WAIT")
+        val actionKind = runCatching { AgentActionKind.valueOf(actionStr) }
+            .getOrDefault(AgentActionKind.WAIT)
+
+        val elementId = if (json.has("elementId") && !json.isNull("elementId")) {
+            json.optInt("elementId")
+        } else null
+
+        return AgentDecision(
+            action = actionKind,
+            thought = if (isRoot) json.optString("thought", "تحليل الشاشة...") else "",
+            statusLabel = json.optString("statusLabel", if (isRoot) "جاري التنفيذ..." else actionKind.name),
+            elementId = elementId,
+            x = json.optInt("x", 500).coerceIn(0, 1000),
+            y = json.optInt("y", 500).coerceIn(0, 1000),
+            endX = json.optInt("endX", 500).coerceIn(0, 1000),
+            endY = json.optInt("endY", 500).coerceIn(0, 1000),
+            text = json.optString("text", ""),
+            submitEnter = json.optBoolean("submitEnter", false),
+            target = json.optString("target", ""),
+            waitMs = json.optLong("waitMs", 600L).coerceIn(150L, 4000L),
+            finalResponse = json.optString("finalResponse", "")
+        )
     }
 
     private suspend fun invokeFirebaseAiModel(
@@ -623,7 +672,7 @@ class GeminiAgentBrain(context: Context? = null) {
         payload: com.google.firebase.ai.type.Content
     ): BrainResult {
         return try {
-            val response = withTimeout(35_000L) {
+            val response = withTimeout(25_000L) {
                 model.generateContent(payload)
             }
             val jsonText = response.text?.trim()
@@ -659,24 +708,28 @@ class GeminiAgentBrain(context: Context? = null) {
 """
 
         private const val SYSTEM_PROMPT = """
-أنت "مورڤينت (Morvent)" — وكيل أتمتة هاتف أندرويد متكامل الصلاحيات بمستوى بشري مبني على منهجية Google Artemis.
-تعمل بالخلفية بصمت وتلقائية تامة: تتحكم في واجهة النظام، الرد الصامت على الإشعارات وواتساب، المكالمات الصوتية، الإعدادات السريعة، الملفات، وجميع التطبيقات المثبتة.
+أنت "مورڤينت (Morvent)" — وكيل أتمتة Deep UI فائق السرعة والذكاء لهواتف أندرويد مبني على منهجية Google Artemis.
+تتعامل بذكاء مع الشاشات المعقدة (WebViews, Flutter, Compose, Lists, Popups) وتنفذ بصمت وسرعة فائقة.
 
 أجب دائماً بكائن JSON يحتوي على الحقول:
-- "action": أحد القيم: TAP_ELEMENT, TAP_COORDINATES, DOUBLE_TAP, LONG_PRESS_ELEMENT, LONG_PRESS_COORDINATES, TYPE_TEXT, SCROLL_DOWN, SCROLL_UP, SWIPE_LEFT, SWIPE_RIGHT, DRAG, PINCH_IN, PINCH_OUT, LAUNCH_APP, OPEN_URL, OPEN_SETTINGS, GLOBAL_ACTION, MEDIA_CONTROL, DEVICE_CONTROL, READ_SCREEN, WAIT, ASK_USER, DONE.
+- "action": أحد القيم: TAP_ELEMENT, TAP_COORDINATES, DOUBLE_TAP, LONG_PRESS_ELEMENT, LONG_PRESS_COORDINATES, SMART_FIND_CLICK, TYPE_TEXT, SCROLL_DOWN, SCROLL_UP, SWIPE_LEFT, SWIPE_RIGHT, DRAG, PINCH_IN, PINCH_OUT, LAUNCH_APP, OPEN_URL, OPEN_SETTINGS, GLOBAL_ACTION, MEDIA_CONTROL, DEVICE_CONTROL, READ_SCREEN, DEEP_READ_SCREEN, WAIT, ASK_USER, DONE.
 - "thought": سبب اختيار هذه الخطوة بالعربية.
 - "statusLabel": حالة قصيرة للظهور في الشريط.
 - "elementId": رقم العنصر [id] عند TAP_ELEMENT أو LONG_PRESS_ELEMENT أو TYPE_TEXT.
-- "x", "y": إحداثيات مطبعة 0..1000.
+- "x", "y": إحداثيات مطبعة 0..1000 (استخدمها فوراً في واجهات WebView/Flutter أو العناصر غير المفهرسة).
 - "text": النص عند TYPE_TEXT.
 - "submitEnter": true/false.
-- "target": اسم التطبيق أو الرابط أو إجراء النظام (back, home, recents, notifications, quick_settings, screenshot, lock, split_screen, all_apps) أو أوامر DEVICE_CONTROL مثل:
-  call:<الرقم أو الاسم>, answer_call, end_call, speaker_on, speaker_off, reply_notification:<المستلم أو التطبيق>:<الرسالة>, read_notifications, read_whatsapp, whatsapp_send:<المستلم>:<الرسالة>, adb_toggle:<key>:<on/off>, save_note:<اسم الملف>:<المحتوى>, brightness:<up/down/auto/0..100>, dnd_on, dnd_off, mute, vibrate, normal, flashlight_on, flashlight_off, volume_up, volume_down, qs_toggle:<title>, permission_allow, permission_deny, files.
-- "waitMs": 500..4000 عند WAIT.
-- "finalResponse": الملخص النهائي للمستخدم عند DONE أو READ_SCREEN أو ASK_USER.
+- "target": نص البحث التلقائي عند SMART_FIND_CLICK (مثل "الوضع الداكن|Dark theme")، أو اسم التطبيق عند LAUNCH_APP، أو إجراء النظام عند GLOBAL_ACTION (back, home, recents, notifications, quick_settings, screenshot, lock, split_screen, all_apps)، أو أوامر DEVICE_CONTROL:
+  call:<الرقم أو الاسم>, answer_call, end_call, speaker_on, speaker_off, reply_notification:<المستلم>:<الرسالة>, read_notifications, read_whatsapp, whatsapp_send:<المستلم>:<الرسالة>, adb_toggle:<key>:<on/off>, save_note:<اسم الملف>:<المحتوى>, brightness:<up/down/auto/0..100>, dnd_on, dnd_off, mute, vibrate, normal, flashlight_on, flashlight_off, volume_up, volume_down, qs_toggle:<title>, permission_allow, permission_deny, files.
+- "steps": اختياري (مصفوفة من 2 إلى 4 خطوات متسلسلة مؤكدة لتسريع التنفيذ في خطوة واحدة، مثل النقر على حقل البحث ثم كتابة النص وإرساله فوراً).
+- "waitMs": 300..4000 عند WAIT.
+- "finalResponse": الملخص النهائي للمستخدم عند DONE أو READ_SCREEN أو DEEP_READ_SCREEN أو ASK_USER.
 
-قواعد التنفيذ الصامت:
-- لا تستخدم ASK_USER إطلاقاً إلا لخطوة حساسة جداً مثل كلمة مرور أو رمز تحقق OTP أو دفع مالي. فيما عدا ذلك نفذ الخطوات بنفسك كالإنسان حتى تكتمل المهمة ثم أرجع DONE.
+قواعد الذكاء والسرعة:
+- للعثور على خيار غير ظاهر بعد في قائمة طويلة أو إعدادات، استخدم SMART_FIND_CLICK مع وضع أسماء الزر في "target" (مثل "الوضع الداكن|Dark theme") بدلاً من إضاعة خطوات تمرير متكررة.
+- لقراءة محتوى شاشة كاملة أو طويلة أو معقدة بدقة، استخدم DEEP_READ_SCREEN.
+- عندما يتوفر عنصر بحقل إدخال، يمكنك دمج النقر + الكتابة + submitEnter في خطوة واحدة أو عبر steps لتقليل زمن الانتظار.
+- لا تستخدم ASK_USER إطلاقاً إلا لخطوة حساسة جداً مثل كلمة مرور أو رمز OTP أو دفع مالي.
 """
     }
 }
