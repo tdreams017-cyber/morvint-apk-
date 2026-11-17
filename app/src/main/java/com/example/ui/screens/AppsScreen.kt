@@ -28,7 +28,9 @@ import androidx.compose.material.icons.filled.Apps
 import androidx.compose.material.icons.filled.FindInPage
 import androidx.compose.material.icons.filled.Launch
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.TouchApp
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -286,6 +288,28 @@ private fun AppAutomationCard(
                             color = MorventEmerald,
                             onClick = {
                                 onAutomation("افتح تطبيق ${app.appName} ثم تصفح لأسفل")
+                            }
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        AppActionChip(
+                            icon = Icons.Default.Settings,
+                            label = "إعدادات/أذونات",
+                            color = MorventCyan,
+                            onClick = {
+                                onAutomation("إعدادات تطبيق ${app.appName}")
+                            }
+                        )
+                        AppActionChip(
+                            icon = Icons.Default.Psychology,
+                            label = "خلفية ذكية",
+                            color = MorventPurple,
+                            onClick = {
+                                onAutomation("افتح تطبيق ${app.appName} ثم اقرأ الشاشة بعمق")
                             }
                         )
                     }

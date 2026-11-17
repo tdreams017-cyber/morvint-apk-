@@ -4,7 +4,9 @@ import android.content.Context
 import android.util.Log
 import com.example.ai.ApiKeyManager
 import com.example.device.DeviceController
+import com.example.device.LinuxSandboxManager
 import com.example.device.SystemBridgeManager
+import com.example.model.ChatAttachment
 import com.example.service.MorventAccessibilityService
 import com.example.service.MorventNotificationListenerService
 import kotlinx.coroutines.CancellationException
@@ -71,8 +73,12 @@ class ArtemisAgentEngine(
     private val controller: DeviceController,
     private val brain: GeminiAgentBrain = GeminiAgentBrain(context)
 ) {
-    suspend fun answerGeneralChat(question: String, history: List<ChatTurn> = emptyList()): String =
-        brain.answerGeneralChat(question, history)
+    suspend fun answerGeneralChat(
+        question: String,
+        history: List<ChatTurn> = emptyList(),
+        attachments: List<ChatAttachment> = emptyList(),
+        systemContextSnapshot: String = ""
+    ): String = brain.answerGeneralChat(question, history, attachments, systemContextSnapshot)
 
     suspend fun generateSmartAutoReply(sender: String, incomingText: String, fallback: String): String =
         brain.generateSmartAutoReply(sender, incomingText, fallback)
@@ -83,6 +89,7 @@ class ArtemisAgentEngine(
     fun resetCloudAvailability() = brain.resetCloudAvailability()
     private val keyManager by lazy { ApiKeyManager.getInstance(context) }
     private val systemBridge by lazy { SystemBridgeManager(context) }
+    private val linuxSandbox by lazy { LinuxSandboxManager.getInstance(context) }
     private val tag = "ArtemisAgent"
     private val agentScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var executionJob: Job? = null
@@ -303,6 +310,7 @@ class ArtemisAgentEngine(
 
                     val activeSteerings = steeringNotes.toList()
                     val activeQueued = appendedGoalsQueue.toList()
+                    val sysContextSnap = controller.getUnifiedSystemContextSnapshot()
                     val brainResult = try {
                         brain.decideNextAction(
                             userGoal = goalText,
@@ -314,7 +322,8 @@ class ArtemisAgentEngine(
                             stepHistory = stepHistory,
                             stepNumber = stepNum,
                             maxSteps = maxSteps,
-                            silentExecutionMode = silentMode
+                            silentExecutionMode = silentMode,
+                            systemContextSnapshot = sysContextSnap
                         )
                     } finally {
                         if (screenshot != null && !screenshot.isRecycled) {
@@ -822,6 +831,12 @@ class ArtemisAgentEngine(
 
             AgentActionKind.DEVICE_CONTROL -> executeDeviceControl(decision.target)
 
+            AgentActionKind.LINUX_EXEC -> {
+                val cmd = decision.target.ifBlank { decision.text }.trim()
+                val res = linuxSandbox.executeCommand(cmd)
+                Pair(res.exitCode == 0, "[$ ${res.command}]\n${res.output}")
+            }
+
             AgentActionKind.DEEP_READ_SCREEN -> MorventAccessibilityService.deepReadComplexScreen()
 
             AgentActionKind.WAIT -> {
@@ -1058,6 +1073,22 @@ class ArtemisAgentEngine(
                 val body = parts.drop(2).joinToString(":").trim()
                 Pair(controller.composeEmail(to, subj, body), "فتح مؤلف البريد الإلكتروني")
             }
+            lower == "read_sms" -> {
+                val sms = controller.readRecentSms(10)
+                if (sms.isNotEmpty()) Pair(true, sms.joinToString("\n")) else Pair(false, "تعذر قراءة رسائل SMS بدون إذن READ_SMS")
+            }
+            lower == "read_calls" -> {
+                val calls = controller.readRecentCalls(10)
+                if (calls.isNotEmpty()) Pair(true, calls.joinToString("\n")) else Pair(false, "تعذر قراءة سجل المكالمات بدون إذن READ_CALL_LOG")
+            }
+            lower == "read_calendar" -> {
+                val events = controller.readUpcomingCalendarEvents(8)
+                if (events.isNotEmpty()) Pair(true, events.joinToString("\n")) else Pair(true, "لا توجد مواعيد قادمة")
+            }
+            lower == "app_usage" -> {
+                val apps = controller.getRecentUsedApps(8)
+                if (apps.isNotEmpty()) Pair(true, apps.joinToString(" • ")) else Pair(false, "يرجى تفعيل Usage Access لعرض استخدام التطبيقات")
+            }
             else -> Pair(false, "أمر جهاز غير معروف: $cmd")
         }
     }
@@ -1164,6 +1195,15 @@ class ArtemisAgentEngine(
         val lower = clause.lowercase(Locale.ROOT)
         val steps = mutableListOf<AgentStep>()
         var stepId = startId
+
+        // 00. Direct Linux Shell Execution Step
+        if (lower.startsWith("لينكس:") || lower.startsWith("linux:") || lower.startsWith("bash ") || lower.startsWith("sh ")) {
+            val cmd = clause.replace(Regex("(?i)^(لينكس:|linux:|bash|sh)\\s*"), "").trim()
+            if (cmd.isNotEmpty()) {
+                steps.add(AgentStep(stepId++, "تنفيذ أمر لينكس: $cmd", "LINUX_EXEC_LOCAL", cmd))
+                return steps
+            }
+        }
 
         // 0. Explicit Wait / Delay (e.g. "انتظر 3 ثواني", "انتظر نصف دقيقة", "wait 5 seconds")
         if (lower.startsWith("انتظر") || lower.startsWith("توقف ل") || lower.startsWith("wait")) {
@@ -1717,10 +1757,10 @@ class ArtemisAgentEngine(
         }
     }
 
-    private fun clickWithSynonyms(pipeSeparatedQueries: String): Pair<Boolean, String> {
+    private suspend fun clickWithSynonyms(pipeSeparatedQueries: String): Pair<Boolean, String> {
         val candidates = pipeSeparatedQueries.split("|").map { it.trim() }.filter { it.isNotEmpty() }
         for (q in candidates) {
-            val res = MorventAccessibilityService.clickElementByText(q)
+            val res = MorventAccessibilityService.clickElementSmartWithRecovery(q)
             if (res.first) return res
         }
         return Pair(false, "لم يتم العثور على '$pipeSeparatedQueries'")
@@ -1874,8 +1914,12 @@ class ArtemisAgentEngine(
                 val report = MorventAccessibilityService.inspectCurrentScreen()
                 val primaryBtn = report.buttons.firstOrNull()
                 if (primaryBtn != null) {
-                    MorventAccessibilityService.clickElementByText(primaryBtn)
+                    MorventAccessibilityService.clickElementSmartWithRecovery(primaryBtn)
                 } else Pair(false, "لا يوجد زر أساسي")
+            }
+            "LINUX_EXEC_LOCAL" -> {
+                val res = linuxSandbox.executeCommand(step.target)
+                Pair(res.exitCode == 0, "[$ ${res.command}]\n${res.output}")
             }
             else -> Pair(true, "تم")
         }

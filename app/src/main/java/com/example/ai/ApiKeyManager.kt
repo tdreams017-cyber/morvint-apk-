@@ -90,6 +90,16 @@ class ApiKeyManager private constructor(context: Context) {
     )
     val autoReplyTemplate: StateFlow<String> = _autoReplyTemplate.asStateFlow()
 
+    private val _customInstructions = MutableStateFlow(
+        prefs.getString(KEY_CUSTOM_INSTRUCTIONS, "") ?: ""
+    )
+    val customInstructions: StateFlow<String> = _customInstructions.asStateFlow()
+
+    private val _strictObedienceMode = MutableStateFlow(
+        prefs.getBoolean(KEY_STRICT_OBEDIENCE, true)
+    )
+    val strictObedienceMode: StateFlow<Boolean> = _strictObedienceMode.asStateFlow()
+
     fun setSilentExecutionMode(enabled: Boolean) {
         prefs.edit().putBoolean(KEY_SILENT_EXECUTION, enabled).apply()
         _silentExecutionMode.value = enabled
@@ -104,6 +114,19 @@ class ApiKeyManager private constructor(context: Context) {
         val clean = template.trim().ifBlank { DEFAULT_AUTO_REPLY_TEMPLATE }
         prefs.edit().putString(KEY_AUTO_REPLY_TEMPLATE, clean).apply()
         _autoReplyTemplate.value = clean
+    }
+
+    fun getCustomInstructions(): String = _customInstructions.value.trim()
+
+    fun setCustomInstructions(instructions: String) {
+        val clean = instructions.trim()
+        prefs.edit().putString(KEY_CUSTOM_INSTRUCTIONS, clean).apply()
+        _customInstructions.value = clean
+    }
+
+    fun setStrictObedienceMode(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_STRICT_OBEDIENCE, enabled).apply()
+        _strictObedienceMode.value = enabled
     }
 
     fun updateConnectionStatus(status: String) {
@@ -122,17 +145,29 @@ class ApiKeyManager private constructor(context: Context) {
         private const val KEY_SILENT_EXECUTION = "morvent_silent_execution"
         private const val KEY_AUTO_REPLY_WA = "morvent_auto_reply_wa"
         private const val KEY_AUTO_REPLY_TEMPLATE = "morvent_auto_reply_template"
+        private const val KEY_CUSTOM_INSTRUCTIONS = "morvent_custom_instructions"
+        private const val KEY_STRICT_OBEDIENCE = "morvent_strict_obedience"
 
         const val DEFAULT_AUTO_REPLY_TEMPLATE =
             "مرحباً! أنا المساعد الذكي لمالك الهاتف. تم استلام رسالتك وسيتم الرد عليك في أقرب وقت."
 
+        const val MODEL_HYDROGEN = "gemini-4-hydrogen"
         const val DEFAULT_MODEL = "gemini-3.5-flash-lite"
 
         val SUPPORTED_MODELS = listOf(
+            MODEL_HYDROGEN,
             "gemini-3.5-flash-lite",
             "gemini-flash-lite-latest",
             "gemini-3.8-flash"
         )
+
+        fun modelDisplayLabel(modelId: String): String = when (modelId) {
+            MODEL_HYDROGEN -> "نموذج هيدروجين (gemini-4-hydrogen) ⚡"
+            "gemini-3.5-flash-lite" -> "gemini-3.5-flash-lite (سريع ومتوازن)"
+            "gemini-flash-lite-latest" -> "gemini-flash-lite-latest (الأحدث خفة)"
+            "gemini-3.8-flash" -> "gemini-3.8-flash (تحليل بصري متقدم)"
+            else -> modelId
+        }
 
         @Volatile
         private var INSTANCE: ApiKeyManager? = null

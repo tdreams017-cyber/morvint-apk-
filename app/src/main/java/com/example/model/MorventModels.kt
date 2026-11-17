@@ -3,6 +3,18 @@ package com.example.model
 import java.util.UUID
 
 /**
+ * Uploaded photo or document attachment in Chat.
+ */
+data class ChatAttachment(
+    val uriString: String,
+    val displayName: String,
+    val mimeType: String,
+    val isImage: Boolean,
+    val sizeBytes: Long = 0L,
+    val localLinuxPath: String? = null
+)
+
+/**
  * Chat message model representing commands and agent responses.
  */
 data class ChatMessage(
@@ -14,7 +26,8 @@ data class ChatMessage(
     val actionType: ActionType? = null,
     val actionDetail: String? = null,
     val subSteps: List<String> = emptyList(),
-    val cardData: ActionCardData? = null
+    val cardData: ActionCardData? = null,
+    val attachments: List<ChatAttachment> = emptyList()
 )
 
 enum class MessageStatus {
@@ -50,7 +63,8 @@ enum class ActionType {
     IN_APP_TYPE,
     IN_APP_SCROLL,
     IN_APP_INSPECT,
-    ACCOUNT_WORKFLOW
+    ACCOUNT_WORKFLOW,
+    LINUX_TERMINAL
 }
 
 sealed class ActionCardData {
@@ -111,6 +125,14 @@ sealed class ActionCardData {
         val stepsExecuted: List<String>,
         val isSuccess: Boolean
     ) : ActionCardData()
+
+    data class LinuxCommandCard(
+        val command: String,
+        val workingDir: String,
+        val exitCode: Int,
+        val output: String,
+        val durationMs: Long
+    ) : ActionCardData()
 }
 
 /**
@@ -165,6 +187,11 @@ data class DeviceStatus(
     val contactsPermissionGranted: Boolean = false,
     val batteryOptimizationIgnored: Boolean = false,
     val writeSecureSettingsGranted: Boolean = false,
+    val usageStatsGranted: Boolean = false,
+    val smsPermissionGranted: Boolean = false,
+    val callLogPermissionGranted: Boolean = false,
+    val calendarPermissionGranted: Boolean = false,
+    val locationPermissionGranted: Boolean = false,
     val lightSensorLux: Float = 0f,
     val accelerometerZ: Float = 9.8f,
     val foregroundApp: String? = null,

@@ -1,9 +1,13 @@
 package com.example.ui.screens
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.speech.RecognizerIntent
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -18,6 +22,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -33,11 +38,21 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Accessibility
+import androidx.compose.material.icons.filled.AddComment
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.DoNotDisturbOn
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.QueryStats
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SmartToy
@@ -62,11 +77,16 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import com.example.ai.ChatSessionSummary
+import com.example.model.ChatAttachment
 import com.example.model.ChatMessage
 import com.example.model.MessageStatus
 import com.example.nlp.AgentExecutionState
@@ -75,6 +95,7 @@ import com.example.ui.components.ActionCardContainer
 import com.example.ui.components.SubStepsExpander
 import com.example.ui.theme.MorventAmber
 import com.example.ui.theme.MorventCyan
+import com.example.ui.theme.MorventDarkBg
 import com.example.ui.theme.MorventDarkBorder
 import com.example.ui.theme.MorventDarkSurface
 import com.example.ui.theme.MorventDarkSurfaceElevated
@@ -97,10 +118,62 @@ fun ChatScreen(
     onOpenWriteSettings: () -> Unit = {},
     onOpenDndSettings: () -> Unit = {},
     onOpenNotificationListenerSettings: () -> Unit = {},
+    chatSessions: List<ChatSessionSummary> = emptyList(),
+    currentSessionId: String = "",
+    onNewSession: () -> Unit = {},
+    onSwitchSession: (String) -> Unit = {},
+    onDeleteSession: (String) -> Unit = {},
+    onSendCommandWithAttachments: ((String, List<ChatAttachment>) -> Unit)? = null,
+    onPredictSuggestions: (String) -> List<String> = { emptyList() },
+    onOpenUsageAccessSettings: () -> Unit = {},
+    onRequestExpandedPermissions: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     var inputText by remember { mutableStateOf("") }
+    var pendingAttachments by remember { mutableStateOf<List<ChatAttachment>>(emptyList()) }
+    var showHistoryDialog by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+
+    val submitCurrentInput = {
+        val textToSend = inputText.trim()
+        val attachmentsToSend = pendingAttachments
+        if (textToSend.isNotEmpty() || attachmentsToSend.isNotEmpty()) {
+            val effectiveText = if (textToSend.isNotEmpty()) textToSend else "حلل هذه المرفقات ونفذ المطلوب"
+            if (onSendCommandWithAttachments != null) {
+                onSendCommandWithAttachments(effectiveText, attachmentsToSend)
+            } else {
+                onSendCommand(effectiveText)
+            }
+            inputText = ""
+            pendingAttachments = emptyList()
+        }
+    }
+
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val att = buildChatAttachment(context, uri, forceImage = true)
+            pendingAttachments = (pendingAttachments + att).distinctBy { it.uriString }
+        }
+    }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: Exception) {
+            }
+            val att = buildChatAttachment(context, uri, forceImage = false)
+            pendingAttachments = (pendingAttachments + att).distinctBy { it.uriString }
+        }
+    }
 
     val speechLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
@@ -148,6 +221,10 @@ fun ChatScreen(
         "⚙️ الإعدادات"
     )
 
+    val predictions = remember(inputText, messages.size, currentSessionId) {
+        onPredictSuggestions(inputText)
+    }
+
     LaunchedEffect(messages.size, isThinking) {
         if (messages.isNotEmpty()) {
             listState.animateScrollToItem(messages.size - 1)
@@ -159,6 +236,72 @@ fun ChatScreen(
             .fillMaxSize()
             .background(MorventDarkSurface)
     ) {
+        // Chat History & New Session Strip
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MorventDarkBg.copy(alpha = 0.7f))
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MorventDarkSurfaceElevated,
+                border = androidx.compose.foundation.BorderStroke(1.dp, MorventDarkBorder),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { showHistoryDialog = true }
+                    .testTag("chat_history_btn")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.History,
+                        contentDescription = "سجل المحادثات",
+                        tint = MorventPurple,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "سجل المحادثات (${chatSessions.size.coerceAtLeast(1)})",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = Color.White
+                    )
+                }
+            }
+
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MorventCyan.copy(alpha = 0.16f),
+                border = androidx.compose.foundation.BorderStroke(1.dp, MorventCyan.copy(alpha = 0.45f)),
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onNewSession() }
+                    .testTag("new_chat_session_btn")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AddComment,
+                        contentDescription = "محادثة جديدة",
+                        tint = MorventCyan,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
+                    Text(
+                        text = "محادثة جديدة +",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MorventCyan
+                    )
+                }
+            }
+        }
+
         // Live Artemis Background Execution Banner (command, skip, append & steer while working)
         AnimatedVisibility(visible = agentStatus.isActive) {
             LiveArtemisBanner(
@@ -187,13 +330,57 @@ fun ChatScreen(
                     onOpenOverlaySettings = onOpenOverlaySettings,
                     onOpenWriteSettings = onOpenWriteSettings,
                     onOpenDndSettings = onOpenDndSettings,
-                    onOpenNotificationListenerSettings = onOpenNotificationListenerSettings
+                    onOpenNotificationListenerSettings = onOpenNotificationListenerSettings,
+                    onOpenUsageAccessSettings = onOpenUsageAccessSettings,
+                    onRequestExpandedPermissions = onRequestExpandedPermissions
                 )
             }
 
             if (isThinking) {
                 item {
                     ThinkingIndicator()
+                }
+            }
+        }
+
+        // Pre-Typing & Live-Typing Predictive Suggestions Strip
+        if (predictions.isNotEmpty()) {
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 2.dp, bottom = 2.dp),
+                contentPadding = PaddingValues(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                item {
+                    Icon(
+                        imageVector = Icons.Default.Lightbulb,
+                        contentDescription = "توقع ذكي",
+                        tint = MorventAmber,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+                items(predictions) { suggestion ->
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MorventPurple.copy(alpha = 0.16f),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MorventPurple.copy(alpha = 0.45f)),
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(16.dp))
+                            .clickable { inputText = suggestion }
+                    ) {
+                        Text(
+                            text = suggestion,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFFE9D5FF),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .widthIn(max = 220.dp)
+                                .padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
                 }
             }
         }
@@ -222,6 +409,56 @@ fun ChatScreen(
                         color = MorventCyan,
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
                     )
+                }
+            }
+        }
+
+        // Pending uploaded attachments preview strip
+        if (pendingAttachments.isNotEmpty()) {
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(pendingAttachments, key = { it.uriString }) { att ->
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Color(0xFF102038),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, MorventEmerald.copy(alpha = 0.5f))
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (att.isImage) Icons.Default.Image else Icons.Default.InsertDriveFile,
+                                contentDescription = null,
+                                tint = MorventEmerald,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = att.displayName,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.widthIn(max = 140.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "إزالة المرفق",
+                                tint = MorventRose,
+                                modifier = Modifier
+                                    .size(15.dp)
+                                    .clickable {
+                                        pendingAttachments = pendingAttachments.filterNot { it.uriString == att.uriString }
+                                    }
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -268,15 +505,47 @@ fun ChatScreen(
                     )
                 }
 
+                IconButton(
+                    onClick = {
+                        photoPickerLauncher.launch(
+                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                        )
+                    },
+                    modifier = Modifier
+                        .size(40.dp)
+                        .testTag("attach_image_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Image,
+                        contentDescription = "إرفاق صورة",
+                        tint = MorventEmerald,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
+                IconButton(
+                    onClick = { filePickerLauncher.launch(arrayOf("*/*")) },
+                    modifier = Modifier
+                        .size(40.dp)
+                        .testTag("attach_file_button")
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.AttachFile,
+                        contentDescription = "إرفاق ملف",
+                        tint = MorventCyan,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+
                 OutlinedTextField(
                     value = inputText,
                     onValueChange = { inputText = it },
                     placeholder = {
                         Text(
                             text = if (agentStatus.isActive) "وجّه الوكيل، أضف خطوات بـ 'أضف:'، أو قل 'تخطي'..."
-                            else "اطلب من مورڤينت: مهمة طويلة، أتمتة، تحكم...",
+                            else "اطلب من مورڤينت أو ارفع ملفاً/صورة...",
                             color = Color.Gray,
-                            fontSize = 13.sp
+                            fontSize = 12.5.sp
                         )
                     },
                     colors = OutlinedTextFieldDefaults.colors(
@@ -291,21 +560,11 @@ fun ChatScreen(
                         .testTag("chat_input_field"),
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = {
-                        if (inputText.isNotBlank()) {
-                            onSendCommand(inputText)
-                            inputText = ""
-                        }
-                    })
+                    keyboardActions = KeyboardActions(onSend = { submitCurrentInput() })
                 )
 
                 IconButton(
-                    onClick = {
-                        if (inputText.isNotBlank()) {
-                            onSendCommand(inputText)
-                            inputText = ""
-                        }
-                    },
+                    onClick = { submitCurrentInput() },
                     modifier = Modifier
                         .size(48.dp)
                         .clip(CircleShape)
@@ -320,6 +579,171 @@ fun ChatScreen(
                         tint = Color.Black,
                         modifier = Modifier.size(18.dp)
                     )
+                }
+            }
+        }
+    }
+
+    if (showHistoryDialog) {
+        ChatHistoryDialog(
+            sessions = chatSessions,
+            currentSessionId = currentSessionId,
+            onNewSession = {
+                showHistoryDialog = false
+                onNewSession()
+            },
+            onSwitchSession = { sid ->
+                showHistoryDialog = false
+                onSwitchSession(sid)
+            },
+            onDeleteSession = onDeleteSession,
+            onDismiss = { showHistoryDialog = false }
+        )
+    }
+}
+
+private fun buildChatAttachment(context: Context, uri: Uri, forceImage: Boolean): ChatAttachment {
+    var displayName = "file_${System.currentTimeMillis()}"
+    var sizeBytes = 0L
+    try {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (cursor.moveToFirst()) {
+                if (nameIdx >= 0) displayName = cursor.getString(nameIdx) ?: displayName
+                if (sizeIdx >= 0) sizeBytes = cursor.getLong(sizeIdx)
+            }
+        }
+    } catch (_: Exception) {
+    }
+    val mimeType = context.contentResolver.getType(uri)
+        ?: if (forceImage) "image/jpeg" else "application/octet-stream"
+    val isImage = forceImage || mimeType.startsWith("image/")
+    return ChatAttachment(
+        uriString = uri.toString(),
+        displayName = displayName,
+        mimeType = mimeType,
+        isImage = isImage,
+        sizeBytes = sizeBytes
+    )
+}
+
+@Composable
+private fun ChatHistoryDialog(
+    sessions: List<ChatSessionSummary>,
+    currentSessionId: String,
+    onNewSession: () -> Unit,
+    onSwitchSession: (String) -> Unit,
+    onDeleteSession: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(
+            shape = RoundedCornerShape(20.dp),
+            color = MorventDarkSurface,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MorventDarkBorder),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "سجل المحادثات المحفوظة",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = Color.White
+                    )
+                    IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                        Icon(Icons.Default.Close, contentDescription = "إغلاق", tint = Color.Gray)
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(10.dp),
+                    color = MorventCyan.copy(alpha = 0.16f),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, MorventCyan.copy(alpha = 0.5f)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable(onClick = onNewSession)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(10.dp),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(Icons.Default.AddComment, contentDescription = null, tint = MorventCyan, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("بدء جلسة محادثة جديدة", color = MorventCyan, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 320.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (sessions.isEmpty()) {
+                        item {
+                            Text(
+                                text = "لا توجد جلسات سابقة بعد، ستُحفظ الجلسة الحالية تلقائياً.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = Color.Gray
+                            )
+                        }
+                    }
+                    items(sessions, key = { it.id }) { session ->
+                        val isCurrent = session.id == currentSessionId
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (isCurrent) Color(0xFF0E2538) else MorventDarkSurfaceElevated,
+                            border = androidx.compose.foundation.BorderStroke(
+                                1.dp,
+                                if (isCurrent) MorventCyan else MorventDarkBorder
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable { onSwitchSession(session.id) }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = session.title,
+                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Bold),
+                                        color = if (isCurrent) MorventCyan else Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = "${session.messageCount} رسالة • ${session.lastPreview}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = Color.Gray,
+                                        fontSize = 10.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { onDeleteSession(session.id) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = "حذف المحادثة",
+                                        tint = MorventRose,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -454,7 +878,9 @@ fun ChatBubble(
     onOpenOverlaySettings: () -> Unit,
     onOpenWriteSettings: () -> Unit = {},
     onOpenDndSettings: () -> Unit = {},
-    onOpenNotificationListenerSettings: () -> Unit = {}
+    onOpenNotificationListenerSettings: () -> Unit = {},
+    onOpenUsageAccessSettings: () -> Unit = {},
+    onRequestExpandedPermissions: () -> Unit = {}
 ) {
     val isUser = message.isUser
 
@@ -498,6 +924,50 @@ fun ChatBubble(
                 modifier = Modifier.widthIn(min = 60.dp)
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
+                    if (message.attachments.isNotEmpty()) {
+                        message.attachments.forEach { att ->
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = Color(0xFF0C1829),
+                                border = androidx.compose.foundation.BorderStroke(0.5.dp, MorventEmerald.copy(alpha = 0.5f)),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        imageVector = if (att.isImage) Icons.Default.Image else Icons.Default.InsertDriveFile,
+                                        contentDescription = null,
+                                        tint = MorventEmerald,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = att.displayName,
+                                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                            color = Color.White,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        if (!att.localLinuxPath.isNullOrBlank()) {
+                                            Text(
+                                                text = "Linux: ~/uploads/${att.displayName}",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MorventCyan,
+                                                fontSize = 9.sp,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     Text(
                         text = message.text,
                         style = MaterialTheme.typography.bodyMedium,
@@ -644,6 +1114,64 @@ fun ChatBubble(
                                     text = "تفعيل قراءة رسائل واتساب والرد التلقائي بالخلفية",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MorventCyan,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    if (message.actionDetail == "REQUEST_USAGE_ACCESS") {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MorventAmber.copy(alpha = 0.2f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onOpenUsageAccessSettings() }
+                                .padding(8.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.QueryStats,
+                                    contentDescription = null,
+                                    tint = MorventAmber,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "منح إذن إحصائيات استخدام التطبيقات في الخلفية",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MorventAmber,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+
+                    if (message.actionDetail == "REQUEST_EXPANDED_PERMISSIONS") {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = MorventEmerald.copy(alpha = 0.2f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable { onRequestExpandedPermissions() }
+                                .padding(8.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    Icons.Default.Security,
+                                    contentDescription = null,
+                                    tint = MorventEmerald,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "منح أذونات SMS وسجل المكالمات والتقويم والموقع",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MorventEmerald,
                                     fontWeight = FontWeight.Bold
                                 )
                             }

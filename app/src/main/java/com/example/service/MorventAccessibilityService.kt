@@ -1671,5 +1671,39 @@ class MorventAccessibilityService : AccessibilityService() {
             }
             return Pair(false, "تم فتح المحادثة، ولكن تعذر العثور على زر الإرسال تلقائياً")
         }
+
+        // ========================================================
+        // 9. CORE PERCEPTION SUMMARY & MULTI-STRATEGY CLICK RECOVERY
+        // ========================================================
+        fun getCompactLivePerceptionSummary(): String {
+            val service = serviceRef?.get() ?: return ""
+            return try {
+                val pkg = _currentForegroundPackage.value.ifBlank { "unknown" }
+                val roots = getAllActiveWindowRoots(service)
+                if (roots.isEmpty()) return "التطبيق النشط: $pkg"
+                val snap = captureRichScreenSnapshot()
+                val topLabels = snap.visibleTexts.take(8).joinToString(" • ")
+                "التطبيق: $pkg (${snap.elements.size} عنصر تفاعلي) | أبرز النصوص: $topLabels"
+            } catch (_: Exception) {
+                ""
+            }
+        }
+
+        suspend fun clickElementSmartWithRecovery(query: String): Pair<Boolean, String> {
+            val first = clickElementSmart(query)
+            if (first.first) return first
+
+            // Recovery 1: Adjacent interactive control relative to label
+            val relative = clickRelativeToLabel(query, "next")
+            if (relative.first) return relative
+
+            // Recovery 2: Brief UI settle retry in case animations/WebViews were rendering
+            delay(180)
+            val retry = clickElementSmart(query)
+            if (retry.first) return retry
+
+            // Recovery 3: Scroll and find
+            return findAndClickSmart(query, maxScrolls = 3)
+        }
     }
 }

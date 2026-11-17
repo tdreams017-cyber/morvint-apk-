@@ -1,11 +1,19 @@
 package com.example.nlp
 
 import android.content.Context
+import android.net.Uri
 import android.provider.Settings
 import com.example.ai.ApiKeyManager
+import com.example.ai.ChatHistoryManager
+import com.example.ai.ChatSessionSummary
+import com.example.ai.LearnedUserRule
+import com.example.ai.UserLearningManager
 import com.example.cloud.MorventCloudRepository
 import com.example.device.DeviceController
+import com.example.device.LinuxSandboxManager
+import com.example.model.ActionCardData
 import com.example.model.ActionType
+import com.example.model.ChatAttachment
 import com.example.model.ChatMessage
 import com.example.model.MessageStatus
 import com.example.service.MorventFloatingAgentService
@@ -24,9 +32,9 @@ import kotlinx.coroutines.launch
 import java.util.Locale
 
 /**
- * Shared singleton coordinator synchronizing Morvent's Chat UI,
- * Background Floating HUD Service, Notification RemoteInput, and
- * the Gemini-powered Artemis Autonomous Mobile Agent.
+ * Shared singleton coordinator synchronizing Morvent's Chat UI, Chat History Sessions,
+ * User Style Learning Engine, Linux Sandbox, Floating HUD Service, Notification RemoteInput,
+ * and the Gemini/Hydrogen-powered Artemis Autonomous Mobile Agent.
  */
 class MorventAgentHub private constructor(context: Context) {
 
@@ -34,6 +42,9 @@ class MorventAgentHub private constructor(context: Context) {
     private val hubScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     val apiKeyManager = ApiKeyManager.getInstance(appContext)
+    val userLearningManager = UserLearningManager.getInstance(appContext)
+    val chatHistoryManager = ChatHistoryManager.getInstance(appContext)
+    val linuxSandboxManager = LinuxSandboxManager.getInstance(appContext)
     val deviceController = DeviceController(appContext)
     val artemisEngine = ArtemisAgentEngine(appContext, deviceController)
     val commandEngine = MorventCommandEngine(appContext, deviceController, artemisEngine)
@@ -46,21 +57,11 @@ class MorventAgentHub private constructor(context: Context) {
         }.getOrNull()
     }
 
-    private val _messages = MutableStateFlow(
-        listOf(
-            ChatMessage(
-                text = "مرحباً بك! أنا **مورڤينت (Morvent)**، مساعد الذكاء الاصطناعي ووكيل التحكم الشامل بالهاتف المدعوم بـ **Gemini AI + Google Artemis**.\n" +
-                        "يمكنك التحدث معي في أي موضوع وسأجيبك بالذكاء الاصطناعي فوراً، أو طلب أي مهمة تحكم على هاتفك وسأنفذها مثل الإنسان!",
-                isUser = false,
-                actionType = ActionType.HELP,
-                subSteps = listOf(
-                    "محادثة حرة بالذكاء الاصطناعي وفهم سياق الكلام عبر Gemini",
-                    "تحكم بشري كامل: نقر، نقر مزدوج، ضغط مطول، سحب، تكبير، وكتابة",
-                    "مزامنة سحابية عبر Firebase وإمكانية تعديل مفتاح Gemini API من الإعدادات 🔑"
-                )
-            )
-        )
-    )
+    val sessions: StateFlow<List<ChatSessionSummary>> = chatHistoryManager.sessions
+    val currentSessionId: StateFlow<String> = chatHistoryManager.currentSessionId
+    val learnedRules: StateFlow<List<LearnedUserRule>> = userLearningManager.learnedRules
+
+    private val _messages = MutableStateFlow(loadInitialMessages())
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
 
     private val _isThinking = MutableStateFlow(false)
@@ -71,7 +72,28 @@ class MorventAgentHub private constructor(context: Context) {
 
     private val recentAutoReplyCooldown = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
+    private fun loadInitialMessages(): List<ChatMessage> {
+        val sessionId = chatHistoryManager.currentSessionId.value
+        val restored = chatHistoryManager.loadSessionMessages(sessionId)
+        return restored.ifEmpty { listOf(buildWelcomeMessage()) }
+    }
+
+    private fun buildWelcomeMessage(): ChatMessage = ChatMessage(
+        text = "مرحباً بك! أنا **مورڤينت (Morvent)**، مساعد الذكاء الاصطناعي ووكيل التحكم الشامل بالهاتف المدعوم بـ **نموذج هيدروجين / Gemini + Google Artemis + بيئة Linux**.\n" +
+            "يمكنك التحدث معي أو رفع صور وملفات لتحليلها، كما أنفذ أوامرك بالحرف في قلب النظام وأحفظ أسلوبك وسجل محادثاتك!",
+        isUser = false,
+        actionType = ActionType.HELP,
+        subSteps = listOf(
+            "نموذج هيدروجين (gemini-4-hydrogen) + تعليماتك الخاصة + طاعة حرفية بدون رفض",
+            "رفع الصور والملفات وتحليلها + حفظها في بيئة لينكس ~/uploads",
+            "نظام تعلم مستمر، سجل محادثات متكامل، وتوقع ذكي قبل الكتابة وأثناءها"
+        )
+    )
+
     init {
+        if (chatHistoryManager.loadSessionMessages(chatHistoryManager.currentSessionId.value).isEmpty()) {
+            chatHistoryManager.saveSession(chatHistoryManager.currentSessionId.value, _messages.value)
+        }
         hubScope.launch(Dispatchers.IO) {
             MorventNotificationListenerService.incomingEvents.collect { event ->
                 if (!apiKeyManager.autoReplyWhatsApp.value) return@collect
@@ -119,11 +141,46 @@ class MorventAgentHub private constructor(context: Context) {
     }
 
     fun clearChat() {
-        _messages.value = emptyList()
+        val fresh = listOf(buildWelcomeMessage())
+        _messages.value = fresh
+        chatHistoryManager.saveSession(chatHistoryManager.currentSessionId.value, fresh)
     }
 
+    fun startNewSession() {
+        val welcome = listOf(buildWelcomeMessage())
+        chatHistoryManager.createNewSession(welcome)
+        _messages.value = welcome
+    }
+
+    fun switchSession(sessionId: String) {
+        val loaded = chatHistoryManager.switchSession(sessionId)
+        _messages.value = loaded.ifEmpty { listOf(buildWelcomeMessage()) }
+    }
+
+    fun deleteSession(sessionId: String) {
+        val nextId = chatHistoryManager.deleteSession(sessionId)
+        val loaded = chatHistoryManager.loadSessionMessages(nextId)
+        _messages.value = loaded.ifEmpty { listOf(buildWelcomeMessage()) }
+    }
+
+    fun teachRule(instruction: String) = userLearningManager.teachRule(instruction)
+    fun removeLearnedRule(ruleId: String) = userLearningManager.removeRule(ruleId)
+
+    fun predictSuggestions(prefix: String): List<String> =
+        userLearningManager.getPredictiveSuggestions(
+            prefix = prefix,
+            installedApps = deviceController.getInstalledApps(),
+            limit = 8
+        )
+
     fun appendMessage(message: ChatMessage) {
-        _messages.update { it + message }
+        _messages.update { current ->
+            val updated = current + message
+            if (message.text != "جاري التفكير والصياغة...") {
+                chatHistoryManager.saveSession(chatHistoryManager.currentSessionId.value, updated)
+            }
+            updated
+        }
         syncMessageToCloud(message)
     }
 
@@ -144,19 +201,42 @@ class MorventAgentHub private constructor(context: Context) {
     }
 
     /**
-     * Unified entry point for commands coming from ChatScreen, Floating HUD,
+     * Unified entry point for commands & attachments coming from ChatScreen, Floating HUD,
      * Notification RemoteInput, or App Shortcuts.
      */
     fun submitCommand(
         commandText: String,
         sourceLabel: String = "الشات",
+        attachments: List<ChatAttachment> = emptyList(),
         onResult: ((Boolean, String) -> Unit)? = null
     ) {
         val trimmed = commandText.trim()
-        if (trimmed.isEmpty()) return
-        val lower = trimmed.lowercase(Locale.ROOT)
+        if (trimmed.isEmpty() && attachments.isEmpty()) return
 
-        appendMessage(ChatMessage(text = trimmed, isUser = true))
+        // Mirror uploaded files into private Linux workspace ~/uploads for instant access
+        val enrichedAttachments = attachments.map { att ->
+            val savedFile = runCatching {
+                linuxSandboxManager.saveUploadedFile(Uri.parse(att.uriString), att.displayName)
+            }.getOrNull()
+            if (savedFile != null) att.copy(localLinuxPath = savedFile.absolutePath) else att
+        }
+
+        val effectiveText = trimmed.ifBlank {
+            if (enrichedAttachments.any { it.isImage }) "حلل الصورة المرفقة واشرح محتواها بدقة ونفذ المطلوب"
+            else "اقرأ وحلل الملف المرفق بدقة واشرح محتواه"
+        }
+        val lower = effectiveText.lowercase(Locale.ROOT)
+
+        appendMessage(
+            ChatMessage(
+                text = effectiveText,
+                isUser = true,
+                attachments = enrichedAttachments
+            )
+        )
+
+        // Learn command patterns & style continuously
+        userLearningManager.recordUserCommand(effectiveText)
 
         // 1. Live Stop / Pause / Resume Commands
         if (lower in listOf("توقف", "اوقف", "ايقاف", "إيقاف", "الغاء", "إلغاء", "stop", "cancel", "abort")) {
@@ -200,11 +280,20 @@ class MorventAgentHub private constructor(context: Context) {
             }
         }
 
+        // 1.5 If attachments are present, always route to multimodal AI (unless explicit linux: prefix)
+        if (enrichedAttachments.isNotEmpty() && !lower.startsWith("لينكس:")) {
+            dispatchMultimodalChat(effectiveText, enrichedAttachments, onResult)
+            return
+        }
+
         // 1.8 Direct Execution Trigger ("نفذ", "نفذه", "طبق", "قم بتنفيذ")
-        val executionTriggers = listOf("نفذ مباشرة", "نفذه مباشرة", "نفذها مباشرة", "نفذ", "نفذه", "نفذها", "طبق هذا", "طبقها", "طبق", "قم بتنفيذ", "قم بذلك", "افعلها", "افعل", "execute", "do it")
+        val executionTriggers = listOf(
+            "نفذ مباشرة", "نفذه مباشرة", "نفذها مباشرة", "نفذ", "نفذه", "نفذها",
+            "طبق هذا", "طبقها", "طبق", "قم بتنفيذ", "قم بذلك", "افعلها", "افعل", "execute", "do it"
+        )
         val hasExecutionTrigger = executionTriggers.any { lower.contains(it) }
         if (hasExecutionTrigger) {
-            val coreTask = extractCoreExecutionGoal(trimmed)
+            val coreTask = extractCoreExecutionGoal(effectiveText)
             if (commandEngine.isFastDeterministicCommand(coreTask)) {
                 _isThinking.value = true
                 hubScope.launch {
@@ -221,41 +310,9 @@ class MorventAgentHub private constructor(context: Context) {
             }
         }
 
-        // 2.5 General AI Chat QA check (answering any general question or conversation via Gemini AI)
-        if (isGeneralChatQuestion(trimmed) && !commandEngine.isFastDeterministicCommand(trimmed)) {
-            val recentHistory = _messages.value
-                .dropLast(1) // exclude current message just appended
-                .filter { it.text != "جاري التفكير والصياغة..." && it.actionType != ActionType.HELP || it.isUser }
-                .takeLast(8)
-                .map { ChatTurn(isUser = it.isUser, text = it.text) }
-
-            _isThinking.value = true
-            _messages.update { it + ChatMessage(text = "جاري التفكير والصياغة...", isUser = false, status = MessageStatus.INFO) }
-            hubScope.launch {
-                val rawAnswer = artemisEngine.answerGeneralChat(trimmed, recentHistory)
-                _isThinking.value = false
-
-                val goalRegex = Regex("\\[\\[EXECUTE_GOAL:\\s*(.+?)\\]\\]", RegexOption.DOT_MATCHES_ALL)
-                val goalMatch = goalRegex.find(rawAnswer)
-                val extractedGoal = goalMatch?.groupValues?.getOrNull(1)?.trim().orEmpty()
-                val cleanAnswer = rawAnswer.replace(goalRegex, "").trim()
-                    .ifBlank { if (extractedGoal.isNotEmpty()) "حسناً، سأنفذ ذلك فوراً الآن 🤖..." else rawAnswer }
-
-                val replyMsg = ChatMessage(
-                    text = cleanAnswer,
-                    isUser = false,
-                    status = if (cleanAnswer.startsWith("⚠️") || cleanAnswer.startsWith("تعذر الوصول")) MessageStatus.ERROR else MessageStatus.SUCCESS,
-                    actionType = ActionType.HELP
-                )
-                _messages.update { list -> list.dropLast(1) + replyMsg }
-                syncMessageToCloud(replyMsg)
-                speakIfEnabled(cleanAnswer)
-
-                if (extractedGoal.isNotEmpty()) {
-                    executeGoalFromAi(extractedGoal, "توجيه الذكاء الاصطناعي")
-                }
-                onResult?.invoke(true, cleanAnswer)
-            }
+        // 2.5 General AI Chat QA check
+        if (isGeneralChatQuestion(effectiveText) && !commandEngine.isFastDeterministicCommand(effectiveText)) {
+            dispatchMultimodalChat(effectiveText, enrichedAttachments, onResult)
             return
         }
 
@@ -278,7 +335,7 @@ class MorventAgentHub private constructor(context: Context) {
             val appendPrefixes = listOf("أضف:", "اضف:", "أضف ", "اضف ", "وكمان ", "ثم أضف ", "بعدها أضف ", "add:", "append:")
             val matchedAppendPrefix = appendPrefixes.firstOrNull { lower.startsWith(it) }
             if (matchedAppendPrefix != null) {
-                val extraGoal = trimmed.substring(matchedAppendPrefix.length).trim()
+                val extraGoal = effectiveText.substring(matchedAppendPrefix.length).trim()
                 if (extraGoal.isNotEmpty()) {
                     val addedSteps = artemisEngine.appendGoal(extraGoal)
                     val appendMsg = ChatMessage(
@@ -297,14 +354,14 @@ class MorventAgentHub private constructor(context: Context) {
 
             val replaceTask = lower.startsWith("بدل:") || lower.startsWith("جديد:")
             if (replaceTask) {
-                val newGoal = trimmed.replace(Regex("^(بدل:|جديد:)\\s*"), "").trim()
+                val newGoal = effectiveText.replace(Regex("^(بدل:|جديد:)\\s*"), "").trim()
                 startAutonomousGoal(newGoal, sourceLabel, onResult)
                 return
             }
 
-            if (commandEngine.isFastDeterministicCommand(trimmed)) {
+            if (commandEngine.isFastDeterministicCommand(effectiveText)) {
                 hubScope.launch {
-                    val responseMsg = commandEngine.processCommand(trimmed)
+                    val responseMsg = commandEngine.processCommand(effectiveText)
                     appendMessage(responseMsg)
                     speakIfEnabled(responseMsg.text)
                     onResult?.invoke(responseMsg.status != MessageStatus.ERROR, responseMsg.text)
@@ -312,13 +369,13 @@ class MorventAgentHub private constructor(context: Context) {
                 return
             }
 
-            // Live Mid-Task Steering: inject the user's new instruction into the running loop
-            artemisEngine.steer(trimmed)
+            // Live Mid-Task Steering
+            artemisEngine.steer(effectiveText)
             if (artemisEngine.status.value.state == AgentExecutionState.PAUSED) {
                 artemisEngine.resume()
             }
             val steerMsg = ChatMessage(
-                text = "تم استلام توجيهك الحي أثناء العمل: \"$trimmed\" 🎯. سيتم تطبيقه في الخطوة الحالية فوراً.",
+                text = "تم استلام توجيهك الحي أثناء العمل: \"$effectiveText\" 🎯. سيتم تطبيقه في الخطوة الحالية فوراً.",
                 isUser = false,
                 status = MessageStatus.INFO,
                 actionType = ActionType.ACCOUNT_WORKFLOW
@@ -329,14 +386,14 @@ class MorventAgentHub private constructor(context: Context) {
             return
         }
 
-        // 3. Fast Deterministic Hardware / Utility / Single-Step Path (instant offline response)
-        if (commandEngine.isFastDeterministicCommand(trimmed)) {
+        // 3. Fast Deterministic Hardware / Utility / Linux / Single-Step Path
+        if (commandEngine.isFastDeterministicCommand(effectiveText)) {
             _isThinking.value = true
             hubScope.launch {
-                val responseMsg = commandEngine.processCommand(trimmed)
+                val responseMsg = commandEngine.processCommand(effectiveText)
                 _isThinking.value = false
                 if (responseMsg.actionDetail == "ROUTE_TO_ARTEMIS_AI") {
-                    startAutonomousGoal(trimmed, sourceLabel, onResult)
+                    startAutonomousGoal(effectiveText, sourceLabel, onResult)
                 } else {
                     appendMessage(responseMsg)
                     speakIfEnabled(responseMsg.text)
@@ -346,9 +403,90 @@ class MorventAgentHub private constructor(context: Context) {
             return
         }
 
-        // 4. Universal Autonomous Human-Level Execution via Gemini Vision + Artemis Loop
-        val cleanGoal = trimmed.replace(Regex("^(أتمتة:|نفذ:|مهمة:)\\s*"), "").trim()
+        // 4. Universal Autonomous Human-Level Execution via Gemini/Hydrogen + Artemis Loop
+        val cleanGoal = effectiveText.replace(Regex("^(أتمتة:|نفذ:|مهمة:)\\s*"), "").trim()
         startAutonomousGoal(cleanGoal, sourceLabel, onResult)
+    }
+
+    private fun dispatchMultimodalChat(
+        effectiveText: String,
+        attachments: List<ChatAttachment>,
+        onResult: ((Boolean, String) -> Unit)?
+    ) {
+        val recentHistory = _messages.value
+            .dropLast(1)
+            .filter { it.text != "جاري التفكير والصياغة..." && it.actionType != ActionType.HELP || it.isUser }
+            .takeLast(8)
+            .map { ChatTurn(isUser = it.isUser, text = it.text) }
+
+        val systemSnap = deviceController.getUnifiedSystemContextSnapshot()
+
+        _isThinking.value = true
+        _messages.update { it + ChatMessage(text = "جاري التفكير والصياغة...", isUser = false, status = MessageStatus.INFO) }
+        hubScope.launch {
+            val rawAnswer = artemisEngine.answerGeneralChat(
+                question = effectiveText,
+                history = recentHistory,
+                attachments = attachments,
+                systemContextSnapshot = systemSnap
+            )
+            _isThinking.value = false
+
+            val goalRegex = Regex("\\[\\[EXECUTE_GOAL:\\s*(.+?)\\]\\]", RegexOption.DOT_MATCHES_ALL)
+            val linuxRegex = Regex("\\[\\[LINUX_EXEC:\\s*(.+?)\\]\\]", RegexOption.DOT_MATCHES_ALL)
+
+            val extractedGoal = goalRegex.find(rawAnswer)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+            val extractedLinux = linuxRegex.find(rawAnswer)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+
+            val cleanAnswer = rawAnswer
+                .replace(goalRegex, "")
+                .replace(linuxRegex, "")
+                .trim()
+                .ifBlank {
+                    when {
+                        extractedLinux.isNotEmpty() -> "تم تشغيل بيئة لينكس لتنفيذ الأمر فوراً 🐧..."
+                        extractedGoal.isNotEmpty() -> "حسناً، سأنفذ ذلك فوراً الآن 🤖..."
+                        else -> rawAnswer
+                    }
+                }
+
+            val replyMsg = ChatMessage(
+                text = cleanAnswer,
+                isUser = false,
+                status = if (cleanAnswer.startsWith("⚠️") || cleanAnswer.startsWith("تعذر الوصول")) MessageStatus.ERROR else MessageStatus.SUCCESS,
+                actionType = ActionType.HELP
+            )
+            _messages.update { list ->
+                val updated = list.dropLast(1) + replyMsg
+                chatHistoryManager.saveSession(chatHistoryManager.currentSessionId.value, updated)
+                updated
+            }
+            syncMessageToCloud(replyMsg)
+            speakIfEnabled(cleanAnswer)
+
+            if (extractedLinux.isNotEmpty()) {
+                val linuxRes = linuxSandboxManager.executeCommand(extractedLinux)
+                val cardMsg = ChatMessage(
+                    text = if (linuxRes.exitCode == 0) "نتيجة التنفيذ في بيئة لينكس ($ ${linuxRes.command}) 🐧:" else "خطأ في أمر لينكس (${linuxRes.exitCode}):",
+                    isUser = false,
+                    status = if (linuxRes.exitCode == 0) MessageStatus.SUCCESS else MessageStatus.ERROR,
+                    actionType = ActionType.LINUX_TERMINAL,
+                    cardData = ActionCardData.LinuxCommandCard(
+                        command = linuxRes.command,
+                        workingDir = linuxRes.workingDir,
+                        exitCode = linuxRes.exitCode,
+                        output = linuxRes.output,
+                        durationMs = linuxRes.durationMs
+                    )
+                )
+                appendMessage(cardMsg)
+            }
+
+            if (extractedGoal.isNotEmpty()) {
+                executeGoalFromAi(extractedGoal, "توجيه الذكاء الاصطناعي")
+            }
+            onResult?.invoke(true, cleanAnswer)
+        }
     }
 
     private fun startAutonomousGoal(
@@ -359,7 +497,6 @@ class MorventAgentHub private constructor(context: Context) {
         val plannedPreview = artemisEngine.planGoal(goalText)
         val isLongWorkflow = plannedPreview.size >= 3
 
-        // Keep long cross-app workflows alive cleanly via Floating HUD when overlay permission is granted
         if (isLongWorkflow && !MorventFloatingAgentService.isRunning && Settings.canDrawOverlays(appContext)) {
             runCatching { MorventFloatingAgentService.start(appContext) }
         }
@@ -438,13 +575,17 @@ class MorventAgentHub private constructor(context: Context) {
 
     private fun isGeneralChatQuestion(text: String): Boolean {
         val lower = text.lowercase(Locale.ROOT)
+        if (lower.startsWith("لينكس:") || lower.startsWith("linux:") || lower.startsWith("bash ") || lower.startsWith("sh ")) {
+            return false
+        }
         val automationVerbs = listOf(
             "افتح", "شغل", "اضغط", "انقر", "اكتب", "فعّل", "فعل", "عطل", "انزل", "ارفع",
             "اخفض", "صور", "اتصل", "أتمتة", "نفذ", "مهمة", "ابحث عن", "سجل",
             "سحب", "مرر", "اضبط", "امسح", "قفل", "تقسيم", "كشاف",
             "رد على", "ابعت", "ارسل", "راسل", "دق", "كلم", "اقفل", "انهي", "أنهي",
             "سبيكر", "احفظ", "ملاحظة", "واتساب", "واتس", "مكالمة", "تنفيذ صامت",
-            "رد تلقائي", "إشعار", "اشعار", "ملفات", "جسر"
+            "رد تلقائي", "إشعار", "اشعار", "ملفات", "جسر", "علم مورفنت", "علم مورڤينت",
+            "sms", "التقويم", "المواعيد", "استخدام التطبيقات"
         )
         val hasAutomationVerb = automationVerbs.any { lower.contains(it) }
         if (hasAutomationVerb) return false

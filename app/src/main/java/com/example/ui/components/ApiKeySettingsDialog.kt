@@ -39,6 +39,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -76,6 +78,10 @@ fun ApiKeySettingsDialog(
     userDisplayName: String?,
     userEmail: String?,
     syncedTasksCount: Int,
+    customInstructions: String = "",
+    strictObedienceMode: Boolean = true,
+    onSaveCustomInstructions: (String) -> Unit = {},
+    onToggleStrictObedience: (Boolean) -> Unit = {},
     onSaveApiKey: (String) -> Unit,
     onSelectModel: (String) -> Unit,
     onTestConnection: (String) -> Unit,
@@ -85,6 +91,7 @@ fun ApiKeySettingsDialog(
     onDismiss: () -> Unit
 ) {
     var draftKey by remember(currentApiKey) { mutableStateOf(currentApiKey) }
+    var draftInstructions by remember(customInstructions) { mutableStateOf(customInstructions) }
     var showKeyPlain by remember { mutableStateOf(false) }
 
     Dialog(onDismissRequest = onDismiss) {
@@ -204,11 +211,12 @@ fun ApiKeySettingsDialog(
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
-                                    text = model,
+                                    text = ApiKeyManager.modelDisplayLabel(model),
                                     style = MaterialTheme.typography.bodySmall.copy(
                                         fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal
                                     ),
-                                    color = if (selected) MorventCyan else Color.LightGray
+                                    color = if (selected) MorventCyan else Color.LightGray,
+                                    modifier = Modifier.weight(1f)
                                 )
                                 if (selected) {
                                     Text(
@@ -220,6 +228,80 @@ fun ApiKeySettingsDialog(
                             }
                         }
                     }
+                }
+
+                HorizontalDivider(color = MorventDarkBorder)
+
+                // Strict Obedience Toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "تنفيذ حرفي وطاعة مطلقة (بدون رفض)",
+                            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                            color = Color.White
+                        )
+                        Text(
+                            text = "يطيع أوامرك بالحرف ويحوّلها مباشرة للتنفيذ بدون تردد",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.Gray,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = strictObedienceMode,
+                        onCheckedChange = onToggleStrictObedience,
+                        modifier = Modifier.testTag("strict_obedience_switch"),
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.Black,
+                            checkedTrackColor = MorventEmerald
+                        )
+                    )
+                }
+
+                // Custom Instructions Field
+                Text(
+                    text = "التعليمات الخاصة (Custom Instructions)",
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Bold),
+                    color = MorventCyan
+                )
+                OutlinedTextField(
+                    value = draftInstructions,
+                    onValueChange = { draftInstructions = it },
+                    placeholder = {
+                        Text(
+                            "أدخل تعليماتك الخاصة وأسلوبك المفضل ليطبقه مورڤينت في كل رد ومهمة...",
+                            color = Color.Gray,
+                            fontSize = 11.sp
+                        )
+                    },
+                    minLines = 3,
+                    maxLines = 5,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = MorventPurple,
+                        unfocusedBorderColor = MorventDarkBorder,
+                        focusedTextColor = Color.White,
+                        unfocusedTextColor = Color.White,
+                        cursorColor = MorventPurple
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("custom_instructions_input")
+                )
+                Button(
+                    onClick = { onSaveCustomInstructions(draftInstructions) },
+                    colors = ButtonDefaults.buttonColors(containerColor = MorventPurple),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("save_custom_instructions_btn")
+                ) {
+                    Icon(Icons.Default.Save, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("حفظ التعليمات الخاصة", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                 }
 
                 // Action buttons: Save + Test

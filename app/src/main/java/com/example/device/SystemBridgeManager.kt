@@ -1,12 +1,14 @@
 package com.example.device
 
 import android.Manifest
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
+import android.os.Process
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import com.example.service.MorventAccessibilityService
@@ -24,7 +26,12 @@ data class AgentBridgeCapabilities(
     val contactsGranted: Boolean = false,
     val batteryOptimizationIgnored: Boolean = false,
     val writeSecureSettingsGranted: Boolean = false,
-    val floatingServiceActive: Boolean = false
+    val floatingServiceActive: Boolean = false,
+    val usageStatsGranted: Boolean = false,
+    val smsGranted: Boolean = false,
+    val callLogGranted: Boolean = false,
+    val calendarGranted: Boolean = false,
+    val locationGranted: Boolean = false
 ) {
     val activeCount: Int
         get() = listOf(
@@ -36,10 +43,15 @@ data class AgentBridgeCapabilities(
             callPhoneGranted,
             answerCallsGranted,
             contactsGranted,
-            batteryOptimizationIgnored
+            batteryOptimizationIgnored,
+            usageStatsGranted,
+            smsGranted,
+            callLogGranted,
+            calendarGranted,
+            locationGranted
         ).count { it }
 
-    val totalCount: Int = 9
+    val totalCount: Int = 14
 }
 
 /**
@@ -79,6 +91,28 @@ class SystemBridgeManager(private val context: Context) {
             Manifest.permission.WRITE_SECURE_SETTINGS
         ) == PackageManager.PERMISSION_GRANTED
 
+        val smsGranted = ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.READ_SMS
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val callLogGranted = ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.READ_CALL_LOG
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val calendarGranted = ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.READ_CALENDAR
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val locationGranted = ContextCompat.checkSelfPermission(
+            appContext,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+
+        val usageStatsGranted = hasUsageStatsPermission()
+
         return AgentBridgeCapabilities(
             accessibilityEnabled = MorventAccessibilityService.isRunning || MorventAccessibilityService.isServiceEnabled(appContext),
             notificationListenerEnabled = MorventNotificationListenerService.isConnected.value || MorventNotificationListenerService.isEnabled(appContext),
@@ -90,8 +124,48 @@ class SystemBridgeManager(private val context: Context) {
             contactsGranted = contacts,
             batteryOptimizationIgnored = ignoringBattery,
             writeSecureSettingsGranted = writeSecure,
-            floatingServiceActive = MorventFloatingAgentService.isRunning
+            floatingServiceActive = MorventFloatingAgentService.isRunning,
+            usageStatsGranted = usageStatsGranted,
+            smsGranted = smsGranted,
+            callLogGranted = callLogGranted,
+            calendarGranted = calendarGranted,
+            locationGranted = locationGranted
         )
+    }
+
+    fun hasUsageStatsPermission(): Boolean {
+        return try {
+            val appOps = appContext.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager ?: return false
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                appOps.unsafeCheckOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    appContext.packageName
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                appOps.checkOpNoThrow(
+                    AppOpsManager.OPSTR_GET_USAGE_STATS,
+                    Process.myUid(),
+                    appContext.packageName
+                )
+            }
+            mode == AppOpsManager.MODE_ALLOWED
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    fun openUsageAccessSettings(): Boolean {
+        return try {
+            val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            appContext.startActivity(intent)
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     fun openBatteryOptimizationExemption(): Boolean {
@@ -123,6 +197,7 @@ class SystemBridgeManager(private val context: Context) {
         val notifComponent = "$pkg/${MorventNotificationListenerService::class.java.name}"
         return buildString {
             appendLine("adb shell pm grant $pkg android.permission.WRITE_SECURE_SETTINGS")
+            appendLine("adb shell appops set $pkg GET_USAGE_STATS allow")
             appendLine("adb shell settings put secure enabled_accessibility_services $a11yComponent")
             appendLine("adb shell settings put secure accessibility_enabled 1")
             appendLine("adb shell cmd notification allow_listener $notifComponent")

@@ -6,12 +6,16 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.ai.ChatSessionSummary
+import com.example.ai.LearnedUserRule
 import com.example.cloud.CloudTaskRecord
 import com.example.cloud.MorventCloudRepository
 import com.example.device.AgentBridgeCapabilities
+import com.example.device.LinuxExecutionResult
 import com.example.device.SystemBridgeManager
 import com.example.model.ActionCardData
 import com.example.model.ActionType
+import com.example.model.ChatAttachment
 import com.example.model.ChatMessage
 import com.example.model.DeviceStatus
 import com.example.model.InstalledApp
@@ -38,6 +42,7 @@ import kotlinx.coroutines.launch
 
 enum class MorventTab {
     CHAT,
+    TERMINAL,
     CONTROL_HUB,
     APPS,
     SCENARIOS
@@ -59,7 +64,17 @@ class MorventViewModel(application: Application) : AndroidViewModel(application)
 
     val silentExecutionMode: StateFlow<Boolean> = apiKeyManager.silentExecutionMode
     val autoReplyWhatsApp: StateFlow<Boolean> = apiKeyManager.autoReplyWhatsApp
+    val customInstructions: StateFlow<String> = apiKeyManager.customInstructions
+    val strictObedienceMode: StateFlow<Boolean> = apiKeyManager.strictObedienceMode
     val liveMessages: StateFlow<List<CapturedNotificationMessage>> = MorventNotificationListenerService.recentMessages
+
+    val chatSessions: StateFlow<List<ChatSessionSummary>> = agentHub.sessions
+    val currentSessionId: StateFlow<String> = agentHub.currentSessionId
+    val learnedRules: StateFlow<List<LearnedUserRule>> = agentHub.learnedRules
+
+    val linuxLogs: StateFlow<List<LinuxExecutionResult>> = agentHub.linuxSandboxManager.terminalLogs
+    val linuxCurrentDir: StateFlow<String> = agentHub.linuxSandboxManager.currentDirDisplay
+    val linuxHistory: StateFlow<List<String>> = agentHub.linuxSandboxManager.commandHistory
 
     val apiKey: StateFlow<String> = apiKeyManager.apiKey
     val selectedModel: StateFlow<String> = apiKeyManager.selectedModel
@@ -261,7 +276,12 @@ class MorventViewModel(application: Application) : AndroidViewModel(application)
                     powerSaveMode = deviceController.isPowerSaveMode(),
                     canWriteSystemSettings = caps.writeSettingsGranted,
                     canManageDnd = caps.dndPolicyGranted,
-                    overlayPermissionGranted = caps.overlayGranted
+                    overlayPermissionGranted = caps.overlayGranted,
+                    usageStatsGranted = caps.usageStatsGranted,
+                    smsPermissionGranted = caps.smsGranted,
+                    callLogPermissionGranted = caps.callLogGranted,
+                    calendarPermissionGranted = caps.calendarGranted,
+                    locationPermissionGranted = caps.locationGranted
                 )
             }
         }
@@ -274,10 +294,53 @@ class MorventViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun sendCommand(commandText: String) {
-        agentHub.submitCommand(commandText, sourceLabel = "الشات") { _, _ ->
+    fun sendCommand(commandText: String, attachments: List<ChatAttachment> = emptyList()) {
+        agentHub.submitCommand(commandText, sourceLabel = "الشات", attachments = attachments) { _, _ ->
             refreshDeviceStatus()
         }
+    }
+
+    fun setCustomInstructions(instructions: String) {
+        apiKeyManager.setCustomInstructions(instructions)
+    }
+
+    fun setStrictObedienceMode(enabled: Boolean) {
+        apiKeyManager.setStrictObedienceMode(enabled)
+    }
+
+    fun createNewChatSession() = agentHub.startNewSession()
+    fun switchChatSession(sessionId: String) = agentHub.switchSession(sessionId)
+    fun deleteChatSession(sessionId: String) = agentHub.deleteSession(sessionId)
+
+    fun teachLearningRule(instruction: String) = agentHub.teachRule(instruction)
+    fun removeLearnedRule(ruleId: String) = agentHub.removeLearnedRule(ruleId)
+
+    fun predictSuggestions(prefix: String): List<String> = agentHub.predictSuggestions(prefix)
+
+    fun runLinuxCommand(command: String) {
+        viewModelScope.launch {
+            agentHub.linuxSandboxManager.executeCommand(command)
+        }
+    }
+
+    fun clearLinuxTerminal() {
+        agentHub.linuxSandboxManager.clearLogs()
+    }
+
+    fun uploadFileToLinux(uri: Uri, displayName: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val saved = agentHub.linuxSandboxManager.saveUploadedFile(uri, displayName)
+            val feedback = if (saved != null) {
+                "ls -la '${saved.absolutePath}'"
+            } else {
+                "echo 'Upload failed for $displayName'"
+            }
+            agentHub.linuxSandboxManager.executeCommand(feedback)
+        }
+    }
+
+    fun openUsageAccessSettings() {
+        systemBridge.openUsageAccessSettings()
     }
 
     fun toggleFlashlight() {

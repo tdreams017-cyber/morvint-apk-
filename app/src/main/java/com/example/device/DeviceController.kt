@@ -1066,6 +1066,234 @@ class DeviceController(private val context: Context) : SensorEventListener {
     }
 
     // ==========================================
+    // 8B. HEADLESS CROSS-APP ACCESS & DEEP PERCEPTION
+    // ==========================================
+    fun getRecentUsedApps(limit: Int = 8): List<String> {
+        return try {
+            val usm = context.getSystemService(Context.USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
+                ?: return emptyList()
+            val end = System.currentTimeMillis()
+            val start = end - 24L * 60L * 60L * 1000L
+            val stats = usm.queryUsageStats(android.app.usage.UsageStatsManager.INTERVAL_DAILY, start, end)
+                ?: return emptyList()
+            val pm = context.packageManager
+            stats
+                .filter { it.totalTimeInForeground > 1000L }
+                .sortedByDescending { it.lastTimeUsed }
+                .distinctBy { it.packageName }
+                .take(limit)
+                .map { s ->
+                    val label = runCatching {
+                        pm.getApplicationLabel(pm.getApplicationInfo(s.packageName, 0)).toString()
+                    }.getOrDefault(s.packageName)
+                    val mins = (s.totalTimeInForeground / 60000L).coerceAtLeast(1L)
+                    "$label (${mins}د)"
+                }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun readRecentCalls(limit: Int = 8): List<String> {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALL_LOG) != PackageManager.PERMISSION_GRANTED) {
+            return emptyList()
+        }
+        return try {
+            val list = mutableListOf<String>()
+            val uri = android.provider.CallLog.Calls.CONTENT_URI
+            val projection = arrayOf(
+                android.provider.CallLog.Calls.CACHED_NAME,
+                android.provider.CallLog.Calls.NUMBER,
+                android.provider.CallLog.Calls.TYPE,
+                android.provider.CallLog.Calls.DURATION
+            )
+            context.contentResolver.query(
+                uri,
+                projection,
+                null,
+                null,
+                "${android.provider.CallLog.Calls.DATE} DESC"
+            )?.use { cursor ->
+                val nameCol = cursor.getColumnIndex(android.provider.CallLog.Calls.CACHED_NAME)
+                val numCol = cursor.getColumnIndex(android.provider.CallLog.Calls.NUMBER)
+                val typeCol = cursor.getColumnIndex(android.provider.CallLog.Calls.TYPE)
+                val durCol = cursor.getColumnIndex(android.provider.CallLog.Calls.DURATION)
+                while (cursor.moveToNext() && list.size < limit) {
+                    val name = cursor.getString(nameCol)?.takeIf { it.isNotBlank() }
+                    val num = cursor.getString(numCol) ?: ""
+                    val type = when (cursor.getInt(typeCol)) {
+                        android.provider.CallLog.Calls.INCOMING_TYPE -> "واردة"
+                        android.provider.CallLog.Calls.OUTGOING_TYPE -> "صادرة"
+                        android.provider.CallLog.Calls.MISSED_TYPE -> "فائتة"
+                        else -> "مكالمة"
+                    }
+                    val dur = cursor.getLong(durCol)
+                    val display = name ?: num
+                    list.add("• [$type] $display (${dur}ث)")
+                }
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun readRecentSms(limit: Int = 8): List<String> {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_SMS) != PackageManager.PERMISSION_GRANTED) {
+            return emptyList()
+        }
+        return try {
+            val list = mutableListOf<String>()
+            val uri = Uri.parse("content://sms/inbox")
+            context.contentResolver.query(
+                uri,
+                arrayOf("address", "body"),
+                null,
+                null,
+                "date DESC"
+            )?.use { cursor ->
+                val addrCol = cursor.getColumnIndex("address")
+                val bodyCol = cursor.getColumnIndex("body")
+                while (cursor.moveToNext() && list.size < limit) {
+                    val sender = cursor.getString(addrCol) ?: "غير معروف"
+                    val body = (cursor.getString(bodyCol) ?: "").replace("\n", " ").take(90)
+                    list.add("• من $sender: $body")
+                }
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun readUpcomingCalendarEvents(limit: Int = 6): List<String> {
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) {
+            return emptyList()
+        }
+        return try {
+            val list = mutableListOf<String>()
+            val now = System.currentTimeMillis()
+            val projection = arrayOf(
+                android.provider.CalendarContract.Events.TITLE,
+                android.provider.CalendarContract.Events.DTSTART
+            )
+            val sdf = java.text.SimpleDateFormat("dd/MM HH:mm", Locale.getDefault())
+            context.contentResolver.query(
+                android.provider.CalendarContract.Events.CONTENT_URI,
+                projection,
+                "${android.provider.CalendarContract.Events.DTSTART} >= ?",
+                arrayOf(now.toString()),
+                "${android.provider.CalendarContract.Events.DTSTART} ASC"
+            )?.use { cursor ->
+                val titleCol = cursor.getColumnIndex(android.provider.CalendarContract.Events.TITLE)
+                val startCol = cursor.getColumnIndex(android.provider.CalendarContract.Events.DTSTART)
+                while (cursor.moveToNext() && list.size < limit) {
+                    val title = cursor.getString(titleCol) ?: "حدث"
+                    val dt = cursor.getLong(startCol)
+                    list.add("• ${sdf.format(java.util.Date(dt))}: $title")
+                }
+            }
+            list
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    fun addCalendarEvent(title: String, startMillis: Long = System.currentTimeMillis() + 3600_000L): Pair<Boolean, String> {
+        return try {
+            val intent = Intent(Intent.ACTION_INSERT).apply {
+                data = android.provider.CalendarContract.Events.CONTENT_URI
+                putExtra(android.provider.CalendarContract.Events.TITLE, title)
+                putExtra(android.provider.CalendarContract.EXTRA_EVENT_BEGIN_TIME, startMillis)
+                putExtra(android.provider.CalendarContract.EXTRA_EVENT_END_TIME, startMillis + 3600_000L)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+            Pair(true, "تم فتح إضافة الموعد '$title' في التقويم 📅✓")
+        } catch (e: Exception) {
+            Pair(false, "تعذر فتح التقويم: ${e.message}")
+        }
+    }
+
+    /**
+     * Routes cross-app deep actions directly via package deep-links or background notifications
+     * without forcing manual app browsing when possible.
+     */
+    fun executeAppDeepAction(appQuery: String, actionType: String, payload: String): Pair<Boolean, String> {
+        val q = appQuery.lowercase(Locale.ROOT)
+        val cleanPayload = payload.trim()
+        return when {
+            q.contains("youtube") || q.contains("يوتيوب") -> {
+                val url = if (cleanPayload.isNotBlank()) {
+                    "https://www.youtube.com/results?search_query=${Uri.encode(cleanPayload)}"
+                } else {
+                    "https://www.youtube.com"
+                }
+                val ok = openUrl(url)
+                Pair(ok, if (ok) "تم تنفيذ بحث يوتيوب مباشرة: $cleanPayload ▶️" else "تعذر فتح يوتيوب")
+            }
+            q.contains("telegram") || q.contains("تيليجرام") || q.contains("تليجرام") -> {
+                val uri = if (cleanPayload.startsWith("@") || !cleanPayload.contains(" ")) {
+                    Uri.parse("https://t.me/${cleanPayload.removePrefix("@")}")
+                } else {
+                    Uri.parse("tg://resolve?domain=${Uri.encode(cleanPayload)}")
+                }
+                val ok = runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, uri).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    })
+                    true
+                }.getOrDefault(false)
+                Pair(ok, if (ok) "تم فتح قناة/محادثة تيليجرام مباشرة: $cleanPayload ✈️" else "تعذر فتح تيليجرام")
+            }
+            q.contains("spotify") || q.contains("سبوتيفاي") -> {
+                val uri = Uri.parse("spotify:search:${Uri.encode(cleanPayload)}")
+                val ok = runCatching {
+                    context.startActivity(Intent(Intent.ACTION_VIEW, uri).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    })
+                    true
+                }.getOrElse {
+                    openUrl("https://open.spotify.com/search/${Uri.encode(cleanPayload)}")
+                }
+                Pair(ok, if (ok) "تم تشغيل بحث سبوتيفاي مباشرة: $cleanPayload 🎵" else "تعذر فتح سبوتيفاي")
+            }
+            q.contains("maps") || q.contains("خرائط") -> {
+                val ok = openMapsSearch(cleanPayload)
+                Pair(ok, if (ok) "تم فتح خرائط جوجل للموقع: $cleanPayload 🗺️" else "تعذر فتح الخرائط")
+            }
+            q.contains("gmail") || q.contains("ايميل") || q.contains("بريد") -> {
+                val ok = composeEmail("", "رسالة من مورڤينت", cleanPayload)
+                Pair(ok, if (ok) "تم تجهيز رسالة البريد الإلكتروني ✉️" else "تعذر فتح البريد")
+            }
+            actionType.equals("settings", ignoreCase = true) -> openAppDetails(appQuery)
+            else -> launchAppByQuery(appQuery)
+        }
+    }
+
+    fun getUnifiedSystemContextSnapshot(): String {
+        val sb = StringBuilder()
+        val a11ySummary = com.example.service.MorventAccessibilityService.getCompactLivePerceptionSummary()
+        val recentApps = getRecentUsedApps(5)
+        val notifList = com.example.service.MorventNotificationListenerService.recentMessages.value
+            .take(5)
+            .map { "${it.appLabel} (${it.sender}): ${it.text.take(40)}" }
+        val batt = getBatteryDetails()
+        sb.appendLine("[لقطة النظام الحية الشاملة]:")
+        sb.appendLine("- البطارية: ${batt.percentage}% (${if (batt.isCharging) "يشحن" else "غير موصول"}) | السطوع: ${getScreenBrightnessPercent()}%")
+        if (a11ySummary.isNotBlank()) {
+            sb.appendLine("- الواجهة النشطة حالياً: $a11ySummary")
+        }
+        if (recentApps.isNotEmpty()) {
+            sb.appendLine("- آخر التطبيقات استخداماً في النظام: ${recentApps.joinToString(", ")}")
+        }
+        if (notifList.isNotEmpty()) {
+            sb.appendLine("- أحدث إشعارات الخلفية (${notifList.size}): ${notifList.take(3).joinToString(" | ")}")
+        }
+        return sb.toString().trim()
+    }
+
+    // ==========================================
     // 9. VOICE & HAPTICS
     // ==========================================
     fun speak(text: String) {

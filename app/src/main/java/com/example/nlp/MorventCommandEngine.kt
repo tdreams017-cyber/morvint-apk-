@@ -3,7 +3,9 @@ package com.example.nlp
 import android.content.Context
 import android.provider.Settings
 import com.example.ai.ApiKeyManager
+import com.example.ai.UserLearningManager
 import com.example.device.DeviceController
+import com.example.device.LinuxSandboxManager
 import com.example.device.SystemBridgeManager
 import com.example.model.ActionCardData
 import com.example.model.ActionType
@@ -69,6 +71,13 @@ class MorventCommandEngine(
         if ((lower.startsWith("رد على ") || lower.startsWith("احفظ ملاحظة") || lower.startsWith("عرض الملفات") || lower == "الملفات المحفوظة") && wordCount <= 10) return true
         if (containsAny(lower, "منبه", "alarm", "مؤقت", "timer") && Regex("\\d+").containsMatchIn(lower) && wordCount <= 6) return true
         if (containsAny(lower, "اتصل ب", "اتصل على", "رن على", "اتصل", "call") && wordCount <= 5) return true
+        if (lower.startsWith("لينكس:") || lower.startsWith("لينكس ") || lower.startsWith("terminal:") ||
+            lower.startsWith("نفذ كود:") || lower.startsWith("bash ") || lower.startsWith("sh ") || lower.startsWith("linux:")
+        ) return true
+        if (lower.startsWith("علم مورفنت") || lower.startsWith("علم مورڤينت") || lower.startsWith("احفظ أسلوبي") ||
+            lower.startsWith("احفظ اسلوبي") || containsAny(lower, "القواعد المتعلمة")
+        ) return true
+        if (containsAny(lower, "سجل المكالمات", "المكالمات الأخيرة", "رسائل sms", "الرسائل النصية", "أحداث التقويم", "المواعيد القادمة", "أكثر التطبيقات استخداما", "استخدام التطبيقات", "حالة النظام الكاملة") && wordCount <= 7) return true
 
         return false
     }
@@ -76,6 +85,141 @@ class MorventCommandEngine(
     suspend fun processCommand(userInput: String): ChatMessage {
         val trimmed = userInput.trim()
         val lower = trimmed.lowercase(Locale.ROOT)
+
+        // ========================================================
+        // 00. PRIVATE LINUX SHELL, USER LEARNING & HEADLESS TELEMETRY
+        // ========================================================
+        if (lower.startsWith("لينكس:") || lower.startsWith("لينكس ") || lower.startsWith("terminal:") ||
+            lower.startsWith("نفذ كود:") || lower.startsWith("bash ") || lower.startsWith("sh ") || lower.startsWith("linux:")
+        ) {
+            val rawCmd = trimmed
+                .replace(Regex("(?i)^(لينكس:|لينكس|terminal:|نفذ كود:|linux:|bash|sh)\\s*"), "")
+                .trim()
+            val sandbox = LinuxSandboxManager.getInstance(context)
+            val exec = sandbox.executeCommand(rawCmd)
+            return ChatMessage(
+                text = if (exec.exitCode == 0) "تم تنفيذ أمر لينكس بنجاح ($ ${exec.command}) 🐧✓" else "انتهى أمر لينكس برمز خروج (${exec.exitCode})",
+                isUser = false,
+                status = if (exec.exitCode == 0) MessageStatus.SUCCESS else MessageStatus.ERROR,
+                actionType = ActionType.LINUX_TERMINAL,
+                cardData = ActionCardData.LinuxCommandCard(
+                    command = exec.command,
+                    workingDir = exec.workingDir,
+                    exitCode = exec.exitCode,
+                    output = exec.output,
+                    durationMs = exec.durationMs
+                )
+            )
+        }
+
+        if (lower.startsWith("علم مورفنت") || lower.startsWith("علم مورڤينت") ||
+            lower.startsWith("احفظ أسلوبي") || lower.startsWith("احفظ اسلوبي")
+        ) {
+            val ruleText = trimmed
+                .replace(Regex("^(علم مورفنت|علم مورڤينت|احفظ أسلوبي|احفظ اسلوبي)[:\\s]*"), "")
+                .trim()
+            val learner = UserLearningManager.getInstance(context)
+            val saved = learner.teachRule(ruleText)
+            return if (saved != null) {
+                ChatMessage(
+                    text = "تم حفظ هذه القاعدة في ذاكرة مورڤينت التعليمية الدائمة 🧠✓:\n\"${saved.instruction}\"",
+                    isUser = false,
+                    actionType = ActionType.MACRO_SCENARIO
+                )
+            } else {
+                ChatMessage(
+                    text = "اكتب القاعدة التي تريد تعليمها لي بعد كلمة 'علم مورڤينت:'، مثال:\nعلم مورڤينت: دائماً أجبني باختصار ونفذ مباشرة.",
+                    isUser = false,
+                    status = MessageStatus.INFO,
+                    actionType = ActionType.HELP
+                )
+            }
+        }
+
+        if (containsAny(lower, "سجل المكالمات", "المكالمات الأخيرة")) {
+            val calls = controller.readRecentCalls(10)
+            return if (calls.isNotEmpty()) {
+                ChatMessage(
+                    text = "📞 سجل المكالمات الأخيرة في الخلفية (${calls.size}):\n" + calls.joinToString("\n"),
+                    isUser = false,
+                    actionType = ActionType.PHONE_CALL
+                )
+            } else {
+                ChatMessage(
+                    text = "للوصول الصامت لسجل المكالمات، يرجى منح إذن سجل المكالمات (READ_CALL_LOG) من لوحة التحكم.",
+                    isUser = false,
+                    status = MessageStatus.INFO,
+                    actionType = ActionType.PHONE_CALL,
+                    actionDetail = "REQUEST_EXPANDED_PERMISSIONS"
+                )
+            }
+        }
+
+        if (containsAny(lower, "رسائل sms", "الرسائل النصية")) {
+            val smsList = controller.readRecentSms(10)
+            return if (smsList.isNotEmpty()) {
+                ChatMessage(
+                    text = "📩 أحدث رسائل SMS في الخلفية (${smsList.size}):\n" + smsList.joinToString("\n"),
+                    isUser = false,
+                    actionType = ActionType.SEND_SMS
+                )
+            } else {
+                ChatMessage(
+                    text = "لقراءة رسائل SMS في الخلفية بدون فتح التطبيق، يرجى منح إذن الرسائل النصية من لوحة التحكم.",
+                    isUser = false,
+                    status = MessageStatus.INFO,
+                    actionType = ActionType.SEND_SMS,
+                    actionDetail = "REQUEST_EXPANDED_PERMISSIONS"
+                )
+            }
+        }
+
+        if (containsAny(lower, "أحداث التقويم", "المواعيد القادمة")) {
+            val events = controller.readUpcomingCalendarEvents(8)
+            return if (events.isNotEmpty()) {
+                ChatMessage(
+                    text = "📅 المواعيد والأحداث القادمة (${events.size}):\n" + events.joinToString("\n"),
+                    isUser = false,
+                    actionType = ActionType.MACRO_SCENARIO
+                )
+            } else {
+                ChatMessage(
+                    text = "لا توجد أحداث قادمة أو يلزم منح إذن التقويم (READ_CALENDAR) من لوحة التحكم.",
+                    isUser = false,
+                    status = MessageStatus.INFO,
+                    actionType = ActionType.MACRO_SCENARIO,
+                    actionDetail = "REQUEST_EXPANDED_PERMISSIONS"
+                )
+            }
+        }
+
+        if (containsAny(lower, "أكثر التطبيقات استخداما", "استخدام التطبيقات")) {
+            val used = controller.getRecentUsedApps(10)
+            return if (used.isNotEmpty()) {
+                ChatMessage(
+                    text = "📊 أكثر التطبيقات استخداماً اليوم (في الخلفية):\n• " + used.joinToString("\n• "),
+                    isUser = false,
+                    actionType = ActionType.DEVICE_INFO
+                )
+            } else {
+                ChatMessage(
+                    text = "يرجى تفعيل إذن 'إحصائيات الاستخدام (Usage Access)' ليرى مورڤينت نشاط جميع التطبيقات في الخلفية.",
+                    isUser = false,
+                    status = MessageStatus.INFO,
+                    actionType = ActionType.ACCESSIBILITY_NAV,
+                    actionDetail = "REQUEST_USAGE_ACCESS"
+                )
+            }
+        }
+
+        if (containsAny(lower, "حالة النظام الكاملة")) {
+            val snap = controller.getUnifiedSystemContextSnapshot()
+            return ChatMessage(
+                text = snap,
+                isUser = false,
+                actionType = ActionType.DEVICE_INFO
+            )
+        }
 
         // ========================================================
         // 0A. BACKGROUND FLOATING SERVICE CONTROL VIA CHAT

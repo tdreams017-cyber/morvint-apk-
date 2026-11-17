@@ -5,6 +5,8 @@ import androidx.test.core.app.ApplicationProvider
 import com.example.device.DeviceController
 import com.example.model.ActionCardData
 import com.example.model.ActionType
+import com.example.model.ChatMessage
+import com.example.model.MessageStatus
 import com.example.nlp.AgentExecutionState
 import com.example.nlp.ArtemisAgentEngine
 import com.example.nlp.MorventAgentHub
@@ -12,6 +14,7 @@ import com.example.nlp.MorventCommandEngine
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -564,5 +567,155 @@ class MorventAgentRobolectricTest {
 
         val quickReadSteps = artemisEngine.planGoal("اقرأ لي ما على الشاشة")
         assertEquals("READ_SCREEN_LOCAL", quickReadSteps.first().actionType)
+    }
+
+    @Test
+    fun `hydrogen model, custom instructions, and strict obedience mode persist and inject into brain prompts`() {
+        val keyMgr = com.example.ai.ApiKeyManager.getInstance(context)
+        assertTrue(com.example.ai.ApiKeyManager.SUPPORTED_MODELS.contains(com.example.ai.ApiKeyManager.MODEL_HYDROGEN))
+        assertTrue(com.example.ai.ApiKeyManager.modelDisplayLabel(com.example.ai.ApiKeyManager.MODEL_HYDROGEN).contains("هيدروجين"))
+
+        keyMgr.setSelectedModel(com.example.ai.ApiKeyManager.MODEL_HYDROGEN)
+        assertEquals("gemini-4-hydrogen", keyMgr.getSelectedModelName())
+
+        keyMgr.setCustomInstructions("أجب دائماً باللغة العربية وبأقصى سرعة")
+        assertEquals("أجب دائماً باللغة العربية وبأقصى سرعة", keyMgr.getCustomInstructions())
+
+        keyMgr.setStrictObedienceMode(true)
+        assertTrue(keyMgr.strictObedienceMode.value)
+
+        val learner = com.example.ai.UserLearningManager.getInstance(context)
+        learner.teachRule("أسلوب المستخدم: مقتضب")
+
+        val brain = com.example.nlp.GeminiAgentBrain(context)
+        val chatPrompt = brain.buildEffectiveChatPrompt(
+            systemContextSnapshot = "البطارية: 90%"
+        )
+        assertTrue(chatPrompt.contains("أجب دائماً باللغة العربية وبأقصى سرعة"))
+        assertTrue(chatPrompt.contains("أسلوب المستخدم: مقتضب"))
+        assertTrue(chatPrompt.contains("البطارية: 90%"))
+
+        val agentPrompt = brain.buildEffectiveAgentPrompt("لقطة النظام: البطارية: 90%")
+        assertTrue(agentPrompt.contains("لقطة النظام: البطارية: 90%"))
+        assertTrue(agentPrompt.contains("LINUX_EXEC"))
+
+        // Clean up model preference and learning rule
+        keyMgr.setSelectedModel(com.example.ai.ApiKeyManager.DEFAULT_MODEL)
+        learner.clearLearnedData()
+    }
+
+    @Test
+    fun `userLearningManager teaches rules, records commands, and produces pre-typing and live predictions`() {
+        val learner = com.example.ai.UserLearningManager.getInstance(context)
+        learner.clearLearnedData()
+
+        val rule = learner.teachRule("استخدم يوتيوب دائماً للمقاطع")
+        assertNotNull(rule)
+        assertEquals(1, learner.learnedRules.value.size)
+
+        learner.recordUserCommand("افتح يوتيوب وشغل قرآن كريم", targetAppName = "YouTube")
+        learner.recordUserCommand("افتح يوتيوب وشغل قرآن كريم", targetAppName = "YouTube")
+        learner.recordUserCommand("لينكس: ls -la")
+
+        val preTyping = learner.getPredictiveSuggestions(prefix = "", limit = 5)
+        assertTrue(preTyping.isNotEmpty())
+        assertTrue(preTyping.any { it.contains("افتح يوتيوب") })
+
+        val liveTyping = learner.getPredictiveSuggestions(prefix = "لين", limit = 5)
+        assertTrue(liveTyping.any { it.startsWith("لين") })
+
+        val promptCtx = learner.buildLearningPromptContext()
+        assertTrue(promptCtx.contains("استخدم يوتيوب دائماً للمقاطع"))
+
+        learner.removeRule(rule!!.id)
+        assertTrue(learner.learnedRules.value.isEmpty())
+    }
+
+    @Test
+    fun `chatHistoryManager creates, saves, switches, and deletes multi-session history`() {
+        val history = com.example.ai.ChatHistoryManager.getInstance(context)
+        val s1 = history.createNewSession(
+            listOf(ChatMessage(text = "أهلاً من الجلسة الأولى", isUser = true))
+        )
+        val s2 = history.createNewSession(
+            listOf(ChatMessage(text = "اختبار الجلسة الثانية", isUser = true))
+        )
+
+        assertTrue(history.sessions.value.any { it.id == s1 })
+        assertTrue(history.sessions.value.any { it.id == s2 })
+
+        val loaded1 = history.switchSession(s1)
+        assertEquals(1, loaded1.size)
+        assertEquals("أهلاً من الجلسة الأولى", loaded1.first().text)
+
+        history.deleteSession(s2)
+        assertFalse(history.sessions.value.any { it.id == s2 })
+    }
+
+    @Test
+    fun `linuxSandboxManager executes shell, cd, calc, json, and morvent-info commands`() = runBlocking {
+        val sandbox = com.example.device.LinuxSandboxManager.getInstance(context)
+        assertTrue(sandbox.uploadsDir.exists())
+
+        val pwdRes = sandbox.executeCommand("pwd")
+        assertEquals(0, pwdRes.exitCode)
+        assertTrue(pwdRes.output.contains("morvent_linux"))
+
+        val calcRes = sandbox.executeCommand("calc (25*4)+15")
+        assertEquals(0, calcRes.exitCode)
+        assertEquals("115", calcRes.output)
+
+        val jsonRes = sandbox.executeCommand("""json {"agent":"morvent","ok":true}""")
+        assertEquals(0, jsonRes.exitCode)
+        assertTrue(jsonRes.output.contains("morvent"))
+
+        val echoRes = sandbox.executeCommand("echo hello_morvent_linux")
+        assertEquals(0, echoRes.exitCode)
+        assertTrue(echoRes.output.contains("hello_morvent_linux"))
+
+        val mkdirRes = sandbox.executeCommand("mkdir -p workspace_test && cd workspace_test")
+        assertEquals(0, mkdirRes.exitCode)
+
+        val cdBack = sandbox.executeCommand("cd ~")
+        assertEquals(0, cdBack.exitCode)
+        assertEquals("~", cdBack.workingDir)
+    }
+
+    @Test
+    fun `commandEngine routes linux terminal, user learning, and gemini brain parses LINUX_EXEC`() = runBlocking {
+        assertTrue(commandEngine.isFastDeterministicCommand("لينكس: calc 12*12"))
+        val linuxMsg = commandEngine.processCommand("لينكس: calc 12*12")
+        assertEquals(ActionType.LINUX_TERMINAL, linuxMsg.actionType)
+        assertTrue(linuxMsg.cardData is ActionCardData.LinuxCommandCard)
+        assertEquals("144", (linuxMsg.cardData as ActionCardData.LinuxCommandCard).output)
+
+        assertTrue(commandEngine.isFastDeterministicCommand("علم مورڤينت أجب باختصار دائماً"))
+        val learnMsg = commandEngine.processCommand("علم مورڤينت أجب باختصار دائماً")
+        assertEquals(MessageStatus.SUCCESS, learnMsg.status)
+        assertTrue(learnMsg.text.contains("أجب باختصار دائماً"))
+
+        assertTrue(commandEngine.isFastDeterministicCommand("سجل المكالمات"))
+        val callLogMsg = commandEngine.processCommand("سجل المكالمات")
+        assertEquals("REQUEST_EXPANDED_PERMISSIONS", callLogMsg.actionDetail)
+
+        val brain = com.example.nlp.GeminiAgentBrain(context)
+        val linuxDecisionJson = """
+            {
+              "thought": "تشغيل فحص لينكس في البيئة الخاصة",
+              "statusLabel": "تشغيل لينكس",
+              "action": "LINUX_EXEC",
+              "target": "morvent-info",
+              "steps": [
+                {"action": "LINUX_EXEC", "text": "calc 10+20"}
+              ]
+            }
+        """.trimIndent()
+        val parsed = brain.parseDecisionJson(linuxDecisionJson)
+        assertTrue(parsed is com.example.nlp.BrainResult.Success)
+        val decision = (parsed as com.example.nlp.BrainResult.Success).decision
+        assertEquals(com.example.nlp.AgentActionKind.LINUX_EXEC, decision.action)
+        assertEquals("morvent-info", decision.target)
+        assertEquals(com.example.nlp.AgentActionKind.LINUX_EXEC, decision.steps.first().action)
+        assertEquals("calc 10+20", decision.steps.first().text)
     }
 }

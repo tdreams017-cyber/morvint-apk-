@@ -57,6 +57,8 @@ class MorventFloatingAgentService : Service() {
     private var pauseResumeBtnView: Button? = null
     private var stopBtnView: Button? = null
     private var liveControlsRowView: LinearLayout? = null
+    private var lastNotifText: String = ""
+    private var lastNotifUpdateMs: Long = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -501,8 +503,13 @@ class MorventFloatingAgentService : Service() {
     }
 
     private fun updateNotification(text: String) {
+        val now = System.currentTimeMillis()
+        if (text == lastNotifText) return
+        if (now - lastNotifUpdateMs < 450L) return
+        lastNotifText = text
+        lastNotifUpdateMs = now
         val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, buildNotification(text))
+        manager?.notify(NOTIFICATION_ID, buildNotification(text))
     }
 
     override fun onDestroy() {

@@ -124,6 +124,8 @@ fun ControlHubScreen(
     onOpenNotificationListenerSettings: () -> Unit = {},
     onOpenBatteryOptimizationSettings: () -> Unit = {},
     onRequestPhoneContactsPermissions: () -> Unit = {},
+    onOpenUsageAccess: () -> Unit = {},
+    onOpenTerminalTab: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -178,7 +180,9 @@ fun ControlHubScreen(
             deviceStatus.canWriteSystemSettings,
             deviceStatus.canManageDnd,
             deviceStatus.callPermissionsGranted && deviceStatus.contactsPermissionGranted,
-            deviceStatus.writeSecureSettingsGranted
+            deviceStatus.writeSecureSettingsGranted,
+            deviceStatus.usageStatsGranted,
+            deviceStatus.smsPermissionGranted && deviceStatus.callLogPermissionGranted && deviceStatus.calendarPermissionGranted
         ).count { it }
 
         Card(
@@ -211,7 +215,7 @@ fun ControlHubScreen(
                                 color = Color.White
                             )
                             Text(
-                                text = "مفعّل $activePerms من 8 صلاحيات للتحكم الصامت والمستمر",
+                                text = "مفعّل $activePerms من 10 صلاحيات للتحكم الصامت والنواة",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MorventEmerald,
                                 fontSize = 11.sp
@@ -222,7 +226,7 @@ fun ControlHubScreen(
 
                 Spacer(modifier = Modifier.height(8.dp))
                 LinearProgressIndicator(
-                    progress = { (activePerms / 8f).coerceIn(0f, 1f) },
+                    progress = { (activePerms / 10f).coerceIn(0f, 1f) },
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(6.dp)
@@ -289,6 +293,38 @@ fun ControlHubScreen(
                         granted = deviceStatus.writeSecureSettingsGranted,
                         onClick = { showAdbBridge = !showAdbBridge },
                         modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(6.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    OsPermissionPill(
+                        label = "نشاط التطبيقات",
+                        granted = deviceStatus.usageStatsGranted,
+                        onClick = onOpenUsageAccess,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("bridge_usage_stats_pill")
+                    )
+                    OsPermissionPill(
+                        label = "SMS/سجل/تقويم",
+                        granted = deviceStatus.smsPermissionGranted && deviceStatus.callLogPermissionGranted && deviceStatus.calendarPermissionGranted,
+                        onClick = onRequestPhoneContactsPermissions,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("bridge_sms_calendar_pill")
+                    )
+                    OsPermissionPill(
+                        label = "طرفية لينكس 🐧",
+                        granted = true,
+                        onClick = onOpenTerminalTab,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("bridge_linux_terminal_pill")
                     )
                 }
 

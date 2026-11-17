@@ -23,6 +23,7 @@ import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Layers
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.VolumeUp
@@ -62,6 +63,7 @@ import com.example.ui.screens.AppsScreen
 import com.example.ui.screens.ChatScreen
 import com.example.ui.screens.ControlHubScreen
 import com.example.ui.screens.ScenariosScreen
+import com.example.ui.screens.TerminalScreen
 import com.example.ui.theme.MorventAmber
 import com.example.ui.theme.MorventCyan
 import com.example.ui.theme.MorventDarkBg
@@ -93,6 +95,13 @@ fun MorventMainScreen(
     val agentStatus by viewModel.agentStatus.collectAsState()
     val silentExecutionMode by viewModel.silentExecutionMode.collectAsState()
     val autoReplyWhatsApp by viewModel.autoReplyWhatsApp.collectAsState()
+    val customInstructions by viewModel.customInstructions.collectAsState()
+    val strictObedienceMode by viewModel.strictObedienceMode.collectAsState()
+    val chatSessions by viewModel.chatSessions.collectAsState()
+    val currentSessionId by viewModel.currentSessionId.collectAsState()
+    val linuxLogs by viewModel.linuxLogs.collectAsState()
+    val linuxCurrentDir by viewModel.linuxCurrentDir.collectAsState()
+    val linuxHistory by viewModel.linuxHistory.collectAsState()
     val adbBridgeCommands = remember { viewModel.getAdbBridgeCommands() }
 
     val apiKey by viewModel.apiKey.collectAsState()
@@ -235,7 +244,7 @@ fun MorventMainScreen(
                     selected = activeTab == MorventTab.CHAT,
                     onClick = { viewModel.setTab(MorventTab.CHAT) },
                     icon = { Icon(Icons.Default.Chat, contentDescription = "شات الأوامر") },
-                    label = { Text("الشات") },
+                    label = { Text("الشات", maxLines = 1) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color.Black,
                         selectedTextColor = MorventCyan,
@@ -246,10 +255,24 @@ fun MorventMainScreen(
                 )
 
                 NavigationBarItem(
+                    selected = activeTab == MorventTab.TERMINAL,
+                    onClick = { viewModel.setTab(MorventTab.TERMINAL) },
+                    icon = { Icon(Icons.Default.Terminal, contentDescription = "بيئة لينكس") },
+                    label = { Text("لينكس", maxLines = 1) },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Color.Black,
+                        selectedTextColor = MorventEmerald,
+                        indicatorColor = MorventEmerald,
+                        unselectedIconColor = Color.Gray,
+                        unselectedTextColor = Color.Gray
+                    )
+                )
+
+                NavigationBarItem(
                     selected = activeTab == MorventTab.CONTROL_HUB,
                     onClick = { viewModel.setTab(MorventTab.CONTROL_HUB) },
                     icon = { Icon(Icons.Default.Tune, contentDescription = "لوحة التحكم") },
-                    label = { Text("التحكم") },
+                    label = { Text("التحكم", maxLines = 1) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color.Black,
                         selectedTextColor = MorventCyan,
@@ -263,7 +286,7 @@ fun MorventMainScreen(
                     selected = activeTab == MorventTab.APPS,
                     onClick = { viewModel.setTab(MorventTab.APPS) },
                     icon = { Icon(Icons.Default.Apps, contentDescription = "التطبيقات") },
-                    label = { Text("التطبيقات") },
+                    label = { Text("التطبيقات", maxLines = 1) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color.Black,
                         selectedTextColor = MorventCyan,
@@ -277,7 +300,7 @@ fun MorventMainScreen(
                     selected = activeTab == MorventTab.SCENARIOS,
                     onClick = { viewModel.setTab(MorventTab.SCENARIOS) },
                     icon = { Icon(Icons.Default.AutoAwesome, contentDescription = "السيناريوهات") },
-                    label = { Text("الأوضاع") },
+                    label = { Text("الأوضاع", maxLines = 1) },
                     colors = NavigationBarItemDefaults.colors(
                         selectedIconColor = Color.Black,
                         selectedTextColor = MorventCyan,
@@ -309,7 +332,24 @@ fun MorventMainScreen(
                     onOpenOverlaySettings = { viewModel.openOverlayPermissionSettings() },
                     onOpenWriteSettings = { viewModel.openWriteSettingsPermission() },
                     onOpenDndSettings = { viewModel.openDndPermissionSettings() },
-                    onOpenNotificationListenerSettings = { viewModel.openNotificationListenerSettings() }
+                    onOpenNotificationListenerSettings = { viewModel.openNotificationListenerSettings() },
+                    chatSessions = chatSessions,
+                    currentSessionId = currentSessionId,
+                    onNewSession = { viewModel.createNewChatSession() },
+                    onSwitchSession = { viewModel.switchChatSession(it) },
+                    onDeleteSession = { viewModel.deleteChatSession(it) },
+                    onSendCommandWithAttachments = { cmd, atts -> viewModel.sendCommand(cmd, atts) },
+                    onPredictSuggestions = { prefix -> viewModel.predictSuggestions(prefix) },
+                    onOpenUsageAccessSettings = { viewModel.openUsageAccessSettings() },
+                    onRequestExpandedPermissions = onRequestPhoneContactsPermissions
+                )
+                MorventTab.TERMINAL -> TerminalScreen(
+                    logs = linuxLogs,
+                    currentDir = linuxCurrentDir,
+                    commandHistory = linuxHistory,
+                    onRunCommand = { viewModel.runLinuxCommand(it) },
+                    onClearTerminal = { viewModel.clearLinuxTerminal() },
+                    onUploadFileToLinux = { uri, name -> viewModel.uploadFileToLinux(uri, name) }
                 )
                 MorventTab.CONTROL_HUB -> ControlHubScreen(
                     deviceStatus = deviceStatus,
@@ -336,7 +376,9 @@ fun MorventMainScreen(
                     onToggleAutoReplyWhatsApp = { viewModel.toggleAutoReplyWhatsApp() },
                     onOpenNotificationListenerSettings = { viewModel.openNotificationListenerSettings() },
                     onOpenBatteryOptimizationSettings = { viewModel.openBatteryOptimizationSettings() },
-                    onRequestPhoneContactsPermissions = onRequestPhoneContactsPermissions
+                    onRequestPhoneContactsPermissions = onRequestPhoneContactsPermissions,
+                    onOpenUsageAccess = { viewModel.openUsageAccessSettings() },
+                    onOpenTerminalTab = { viewModel.setTab(MorventTab.TERMINAL) }
                 )
                 MorventTab.APPS -> AppsScreen(
                     installedApps = installedApps,
@@ -368,6 +410,10 @@ fun MorventMainScreen(
                     userDisplayName = userDisplayName,
                     userEmail = userEmail,
                     syncedTasksCount = cloudTasks.size,
+                    customInstructions = customInstructions,
+                    strictObedienceMode = strictObedienceMode,
+                    onSaveCustomInstructions = { viewModel.setCustomInstructions(it) },
+                    onToggleStrictObedience = { viewModel.setStrictObedienceMode(it) },
                     onSaveApiKey = { viewModel.saveApiKey(it) },
                     onSelectModel = { viewModel.selectAiModel(it) },
                     onTestConnection = { viewModel.testAiConnection(it) },

@@ -124,7 +124,13 @@ class MainActivity : ComponentActivity() {
                             val callPerms = mutableListOf(
                                 Manifest.permission.CALL_PHONE,
                                 Manifest.permission.READ_PHONE_STATE,
-                                Manifest.permission.READ_CONTACTS
+                                Manifest.permission.READ_CONTACTS,
+                                Manifest.permission.READ_CALL_LOG,
+                                Manifest.permission.READ_SMS,
+                                Manifest.permission.READ_CALENDAR,
+                                Manifest.permission.WRITE_CALENDAR,
+                                Manifest.permission.ACCESS_FINE_LOCATION,
+                                Manifest.permission.RECORD_AUDIO
                             )
                             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                                 callPerms.add(Manifest.permission.ANSWER_PHONE_CALLS)
@@ -165,6 +171,26 @@ class MainActivity : ComponentActivity() {
                                 != PackageManager.PERMISSION_GRANTED
                             ) {
                                 permissionsNeeded.add(Manifest.permission.READ_CONTACTS)
+                            }
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CALL_LOG)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                permissionsNeeded.add(Manifest.permission.READ_CALL_LOG)
+                            }
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_SMS)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                permissionsNeeded.add(Manifest.permission.READ_SMS)
+                            }
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CALENDAR)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                permissionsNeeded.add(Manifest.permission.READ_CALENDAR)
+                            }
+                            if (ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.ACCESS_FINE_LOCATION)
+                                != PackageManager.PERMISSION_GRANTED
+                            ) {
+                                permissionsNeeded.add(Manifest.permission.ACCESS_FINE_LOCATION)
                             }
                             if (permissionsNeeded.isNotEmpty()) {
                                 permissionsLauncher.launch(permissionsNeeded.toTypedArray())

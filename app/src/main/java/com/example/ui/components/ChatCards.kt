@@ -85,6 +85,7 @@ fun ActionCardContainer(
             is ActionCardData.ScreenInspectionCard -> ScreenInspectionCardView(cardData)
             is ActionCardData.InAppActionResultCard -> InAppActionResultCardView(cardData)
             is ActionCardData.AccountWorkflowCard -> AccountWorkflowCardView(cardData)
+            is ActionCardData.LinuxCommandCard -> LinuxCommandCardView(cardData)
         }
     }
 }
@@ -614,6 +615,67 @@ private fun MetricChip(icon: ImageVector, label: String, value: String) {
         Column {
             Text(text = label, style = MaterialTheme.typography.labelSmall, color = Color.Gray, fontSize = 10.sp)
             Text(text = value, style = MaterialTheme.typography.bodySmall, color = Color.White, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun LinuxCommandCardView(data: ActionCardData.LinuxCommandCard) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color(0xFF060A13))
+            .padding(12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "Linux Shell (${data.workingDir})",
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                color = MorventCyan
+            )
+            Surface(
+                shape = RoundedCornerShape(6.dp),
+                color = if (data.exitCode == 0) MorventEmerald.copy(alpha = 0.2f) else MorventRose.copy(alpha = 0.2f)
+            ) {
+                Text(
+                    text = if (data.exitCode == 0) "exit 0 • ${data.durationMs}ms" else "exit ${data.exitCode}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (data.exitCode == 0) MorventEmerald else MorventRose,
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    fontSize = 10.sp
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = "$ ${data.command}",
+            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            color = MorventEmerald,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold
+        )
+        if (data.output.isNotBlank()) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 220.dp)
+                    .verticalScroll(rememberScrollState())
+                    .background(Color(0xFF0B1120), RoundedCornerShape(8.dp))
+                    .padding(8.dp)
+            ) {
+                Text(
+                    text = data.output,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    color = Color(0xFFE2E8F0),
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp
+                )
+            }
         }
     }
 }

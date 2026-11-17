@@ -2,10 +2,14 @@ package com.example.nlp
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.net.Uri
 import android.util.Base64
 import android.util.Log
 import com.example.BuildConfig
 import com.example.ai.ApiKeyManager
+import com.example.ai.UserLearningManager
+import com.example.model.ChatAttachment
 import com.example.service.RichScreenSnapshot
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
@@ -48,6 +52,7 @@ enum class AgentActionKind {
     GLOBAL_ACTION,
     MEDIA_CONTROL,
     DEVICE_CONTROL,
+    LINUX_EXEC,
     READ_SCREEN,
     DEEP_READ_SCREEN,
     WAIT,
@@ -101,7 +106,9 @@ sealed interface BrainResult {
 class GeminiAgentBrain(context: Context? = null) {
 
     private val tag = "GeminiAgentBrain"
-    private val keyManager = context?.let { ApiKeyManager.getInstance(it) }
+    private val appContext = context?.applicationContext
+    private val keyManager = appContext?.let { ApiKeyManager.getInstance(it) }
+    private val learningManager = appContext?.let { UserLearningManager.getInstance(it) }
 
     @Volatile
     private var isCloudProjectBillingBlocked: Boolean = false
@@ -215,6 +222,58 @@ class GeminiAgentBrain(context: Context? = null) {
         return ordered.toList()
     }
 
+    internal fun buildEffectiveChatPrompt(systemContextSnapshot: String = ""): String {
+        val sb = StringBuilder(CHAT_SYSTEM_PROMPT.trim())
+        val strict = keyManager?.strictObedienceMode?.value ?: true
+        if (strict) {
+            sb.appendLine()
+            sb.appendLine()
+            sb.appendLine("[أمر تشغيل إلزامي — الطاعة الحرفية والتنفيذ المباشر]:")
+            sb.appendLine("- التزم بطلبات المستخدم بحذافيرها وحول أوامره فوراً إلى أفعال عبر [[EXECUTE_GOAL: ...]] أو أوامر شل لينكس عبر [[LINUX_EXEC: ...]].")
+            sb.appendLine("- لا تعتذر ولا ترفض ولا تقل 'لا أستطيع' أبداً؛ قدم أفضل مسار عملي وتنفيذي مباشر على الفور.")
+        }
+        val custom = keyManager?.getCustomInstructions().orEmpty()
+        if (custom.isNotBlank()) {
+            sb.appendLine()
+            sb.appendLine("[التعليمات الخاصة المحددة من المالك (أولوية قصوى)]:")
+            sb.appendLine(custom)
+        }
+        val learned = learningManager?.buildLearningPromptContext().orEmpty()
+        if (learned.isNotBlank()) {
+            sb.appendLine()
+            sb.appendLine(learned)
+        }
+        if (systemContextSnapshot.isNotBlank()) {
+            sb.appendLine()
+            sb.appendLine(systemContextSnapshot)
+        }
+        return sb.toString().trim()
+    }
+
+    internal fun buildEffectiveAgentPrompt(systemContextSnapshot: String = ""): String {
+        val sb = StringBuilder(SYSTEM_PROMPT.trim())
+        val strict = keyManager?.strictObedienceMode?.value ?: true
+        if (strict) {
+            sb.appendLine()
+            sb.appendLine("- القاعدة الصارمة: نفذ تعليمات المستخدم بالحرف دون رفض أو تردد أو أسئلة متكررة.")
+        }
+        val custom = keyManager?.getCustomInstructions().orEmpty()
+        if (custom.isNotBlank()) {
+            sb.appendLine()
+            sb.appendLine("[تعليمات خاصة من المستخدم]: $custom")
+        }
+        val learned = learningManager?.buildLearningPromptContext().orEmpty()
+        if (learned.isNotBlank()) {
+            sb.appendLine()
+            sb.appendLine(learned)
+        }
+        if (systemContextSnapshot.isNotBlank()) {
+            sb.appendLine()
+            sb.appendLine(systemContextSnapshot)
+        }
+        return sb.toString().trim()
+    }
+
     fun getSmartLocalChatResponse(input: String): String? {
         val trimmed = input.trim()
         val lower = trimmed.lowercase(Locale.ROOT)
@@ -292,12 +351,29 @@ class GeminiAgentBrain(context: Context? = null) {
     }
 
     /**
-     * Conversational AI response with real multi-turn memory and zero canned hijacking.
+     * Conversational & Multimodal AI response supporting uploaded images/files, custom instructions,
+     * user style learning, and full system snapshot awareness.
      */
     suspend fun answerGeneralChat(
         question: String,
-        recentHistory: List<ChatTurn> = emptyList()
+        recentHistory: List<ChatTurn> = emptyList(),
+        attachments: List<ChatAttachment> = emptyList(),
+        systemContextSnapshot: String = ""
     ): String {
+        val effectivePrompt = buildEffectiveChatPrompt(systemContextSnapshot)
+        val finalQuestion = buildString {
+            append(question.ifBlank { "حلل المرفقات التالية بدقة ونفذ المطلوب." })
+            if (attachments.isNotEmpty()) {
+                append("\n\n[مرفقات من المستخدم (${attachments.size})]:")
+                attachments.forEach { att ->
+                    append("\n• ${att.displayName} (${att.mimeType})")
+                    if (!att.localLinuxPath.isNullOrBlank()) {
+                        append(" | مسار لينكس: ${att.localLinuxPath}")
+                    }
+                }
+            }
+        }
+
         val apiKey = currentApiKey()
         if (apiKey.isNotBlank()) {
             var lastErrorMsg: String? = null
@@ -305,10 +381,11 @@ class GeminiAgentBrain(context: Context? = null) {
                 val res = callDirectGeminiRest(
                     apiKey = apiKey,
                     modelName = model,
-                    systemInstruction = CHAT_SYSTEM_PROMPT,
+                    systemInstruction = effectivePrompt,
                     historyTurns = recentHistory,
-                    userPrompt = question,
+                    userPrompt = finalQuestion,
                     screenshot = null,
+                    attachments = attachments,
                     expectJson = false
                 )
                 if (res.isSuccess && !res.text.isNullOrBlank()) {
@@ -328,8 +405,21 @@ class GeminiAgentBrain(context: Context? = null) {
 
         // Firebase AI Logic path when no API key is configured
         return try {
-            val payload = content { text(question) }
-            val res = withTimeout(25_000L) { chatModel.generateContent(payload) }
+            val dynamicModel = Firebase.ai.generativeModel(
+                modelName = "gemini-3.5-flash-lite",
+                systemInstruction = content { text(effectivePrompt) }
+            )
+            val payload = content {
+                attachments.forEach { att ->
+                    if (att.isImage) {
+                        loadScaledBitmap(att.uriString)?.let { bmp -> image(bmp) }
+                    } else {
+                        readAttachmentTextPreview(att)?.let { txt -> text(txt) }
+                    }
+                }
+                text(finalQuestion)
+            }
+            val res = withTimeout(25_000L) { dynamicModel.generateContent(payload) }
             val reply = res.text?.trim()
             if (!reply.isNullOrBlank()) reply else getHelpfulConversationalFallback(question)
         } catch (ce: CancellationException) {
@@ -374,7 +464,8 @@ class GeminiAgentBrain(context: Context? = null) {
         stepHistory: List<String>,
         stepNumber: Int,
         maxSteps: Int,
-        silentExecutionMode: Boolean = true
+        silentExecutionMode: Boolean = true,
+        systemContextSnapshot: String = ""
     ): BrainResult {
         val steeringSection = if (steeringNotes.isNotEmpty()) {
             "\nتوجيهات إضافية حية من المستخدم أثناء التنفيذ (أولوية قصوى):\n" +
@@ -423,6 +514,8 @@ class GeminiAgentBrain(context: Context? = null) {
             append("\n\nأرجع كائن JSON فقط يحدد الخطوة الذكية التالية (أو مصفوفة steps مجمعة لخطوات البحث/الكتابة المؤكدة).")
         }
 
+        val effectiveSystemPrompt = buildEffectiveAgentPrompt(systemContextSnapshot)
+
         val apiKey = currentApiKey()
         if (apiKey.isNotBlank()) {
             var lastFailure: BrainResult = BrainResult.Failure("تعذر الاتصال بـ Gemini عبر مفتاح API.", isCloudUnavailable = true)
@@ -430,7 +523,7 @@ class GeminiAgentBrain(context: Context? = null) {
                 val res = callDirectGeminiRest(
                     apiKey = apiKey,
                     modelName = model,
-                    systemInstruction = SYSTEM_PROMPT,
+                    systemInstruction = effectiveSystemPrompt,
                     historyTurns = emptyList(),
                     userPrompt = promptText,
                     screenshot = screenshot,
@@ -479,6 +572,7 @@ class GeminiAgentBrain(context: Context? = null) {
         historyTurns: List<ChatTurn>,
         userPrompt: String,
         screenshot: Bitmap?,
+        attachments: List<ChatAttachment> = emptyList(),
         expectJson: Boolean
     ): RestResponse = withContext(Dispatchers.IO) {
         try {
@@ -511,6 +605,43 @@ class GeminiAgentBrain(context: Context? = null) {
                     )
                 )
             }
+
+            attachments.take(4).forEach { att ->
+                if (att.isImage) {
+                    loadScaledBitmap(att.uriString)?.let { bmp ->
+                        val baos = ByteArrayOutputStream()
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 80, baos)
+                        val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+                        currentParts.put(
+                            JSONObject().put(
+                                "inlineData",
+                                JSONObject().apply {
+                                    put("mimeType", "image/jpeg")
+                                    put("data", b64)
+                                }
+                            )
+                        )
+                        if (!bmp.isRecycled) bmp.recycle()
+                    }
+                } else if (att.mimeType.equals("application/pdf", ignoreCase = true) && att.sizeBytes in 1..2_000_000L) {
+                    readRawBytes(att.uriString, maxBytes = 2_000_000)?.let { bytes ->
+                        currentParts.put(
+                            JSONObject().put(
+                                "inlineData",
+                                JSONObject().apply {
+                                    put("mimeType", "application/pdf")
+                                    put("data", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                                }
+                            )
+                        )
+                    }
+                } else {
+                    readAttachmentTextPreview(att)?.let { textPreview ->
+                        currentParts.put(JSONObject().put("text", textPreview))
+                    }
+                }
+            }
+
             currentParts.put(JSONObject().put("text", userPrompt))
 
             contentsArray.put(
@@ -695,41 +826,92 @@ class GeminiAgentBrain(context: Context? = null) {
         }
     }
 
+    private fun loadScaledBitmap(uriString: String, maxDim: Int = 1024): Bitmap? {
+        val ctx = appContext ?: return null
+        return try {
+            val uri = Uri.parse(uriString)
+            val raw = ctx.contentResolver.openInputStream(uri)?.use { stream ->
+                BitmapFactory.decodeStream(stream)
+            } ?: return null
+            if (raw.width <= maxDim && raw.height <= maxDim) return raw
+            val scale = minOf(maxDim.toFloat() / raw.width, maxDim.toFloat() / raw.height)
+            val scaled = Bitmap.createScaledBitmap(
+                raw,
+                (raw.width * scale).toInt().coerceAtLeast(1),
+                (raw.height * scale).toInt().coerceAtLeast(1),
+                true
+            )
+            if (scaled != raw && !raw.isRecycled) raw.recycle()
+            scaled
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun readRawBytes(uriString: String, maxBytes: Int): ByteArray? {
+        val ctx = appContext ?: return null
+        return try {
+            ctx.contentResolver.openInputStream(Uri.parse(uriString))?.use { stream ->
+                val bytes = stream.readBytes()
+                if (bytes.size <= maxBytes) bytes else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun readAttachmentTextPreview(att: ChatAttachment): String? {
+        val ctx = appContext ?: return null
+        return try {
+            ctx.contentResolver.openInputStream(Uri.parse(att.uriString))?.use { stream ->
+                val bytes = stream.readBytes().take(24_000).toByteArray()
+                val text = String(bytes, Charsets.UTF_8)
+                if (text.any { it.code < 9 && it != '\n' && it != '\r' && it != '\t' }) {
+                    "[ملف مرفق: ${att.displayName}, الحجم: ${att.sizeBytes} بايت, المسار: ${att.localLinuxPath ?: "uploads"}]"
+                } else {
+                    "[محتوى الملف '${att.displayName}']:\n$text"
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     companion object {
         private const val CHAT_SYSTEM_PROMPT = """
-أنت "مورڤينت (Morvent)" — مساعد ذكاء اصطناعي عربي ذكي جداً ومتصل مباشرة بنواة نظام أندرويد ووكيل أتمتة الهاتف (Artemis + Accessibility + Notification Bridge + Telecom).
+أنت "مورڤينت (Morvent)" — مساعد ذكاء اصطناعي عربي فائق الذكاء ومتصل مباشرة بنواة نظام أندرويد وبيئة لينكس ووكيل أتمتة الهاتف (Artemis + Accessibility + Notification Bridge + Telecom + Linux Shell).
 قواعد الرد والتنفيذ:
-1. تحدث بعربية طبيعية ذكية وواضحة، وافهم سياق المحادثة السابقة وتجاوب مع كل ما يقوله المستخدم بدقة.
-2. لا ترد أبداً بقوالب ثابتة، ولا تقل أبداً "لا يمكنني تنفيذ ذلك" على أوامر الهاتف الممكنة؛ بل إذا طلب المستخدم منك أي فعل على الهاتف (مثل: الرد على رسالة واتساب، قراءة رسائل أو إشعارات، إجراء مكالمة أو الرد عليها أو إنهائها، فتح تطبيق، النقر، الكتابة، تعديل الإعدادات/الصوت/السطوع، حفظ ملف)، أضف في آخر ردك سطراً مستقلاً بهذه الصيغة الحرفية فقط لتفعيل التنفيذ الفوري في الهاتف:
+1. تحدث بعربية طبيعية ذكية وواضحة، واحفظ سياق المحادثة السابقة وأسلوب المستخدم بدقة.
+2. نفذ أوامر المستخدم بحرفية تامة ولا ترفض أو تتعذر أبداً. إذا طلب المستخدم أي فعل على الهاتف (الرد على رسالة واتساب/تيليجرام، قراءة إشعارات/SMS/مكالمات/تقويم، إجراء مكالمة، فتح تطبيق والتنقل بداخله، النقر، الكتابة، تعديل الإعدادات)، أضف في آخر ردك سطراً مستقلاً بهذه الصيغة:
 [[EXECUTE_GOAL: وصف الأمر التنفيذي الكامل بالعربية]]
-مثال: إذا قال المستخدم "ممكن تبعت لأحمد على واتساب إني وصلت؟" أجب بجملة قصيرة ثم اكتب في سطر جديد:
-[[EXECUTE_GOAL: أرسل رسالة واتساب إلى أحمد محتواها إني وصلت]]
-3. أما الأسئلة المعرفية أو الدردشة العامة التي لا تطلب فعلاً على الهاتف فأجب عليها إجابة ذكية كاملة بدون وسم [[EXECUTE_GOAL]].
+3. وإذا طلب المستخدم تنفيذ أمر برمجي أو سكريبت أو فحص ملفات في بيئة لينكس (أو معالجة ملف مرفق في ~/uploads)، أضف في آخر ردك سطراً مستقلاً بهذه الصيغة:
+[[LINUX_EXEC: أمر الشِل الدقيق للتنفيذ]]
+4. أما الأسئلة المعرفية أو تحليل الصور/الملفات بدون فعل إضافي فأجب عليها إجابة ذكية متكاملة مباشرة.
 """
 
         private const val SYSTEM_PROMPT = """
 أنت "مورڤينت (Morvent)" — وكيل أتمتة Deep UI فائق السرعة والذكاء لهواتف أندرويد مبني على منهجية Google Artemis.
-تتعامل بذكاء مع الشاشات المعقدة (WebViews, Flutter, Compose, Lists, Popups) وتنفذ بصمت وسرعة فائقة.
+تتعامل بذكاء مع الشاشات المعقدة (WebViews, Flutter, Compose, Lists, Popups) ومع بيئة لينكس الخاصة وتنفذ بالحرف بصمت وسرعة فائقة.
 
 أجب دائماً بكائن JSON يحتوي على الحقول:
-- "action": أحد القيم: TAP_ELEMENT, TAP_COORDINATES, DOUBLE_TAP, LONG_PRESS_ELEMENT, LONG_PRESS_COORDINATES, SMART_FIND_CLICK, TYPE_TEXT, SCROLL_DOWN, SCROLL_UP, SWIPE_LEFT, SWIPE_RIGHT, DRAG, PINCH_IN, PINCH_OUT, LAUNCH_APP, OPEN_URL, OPEN_SETTINGS, GLOBAL_ACTION, MEDIA_CONTROL, DEVICE_CONTROL, READ_SCREEN, DEEP_READ_SCREEN, WAIT, ASK_USER, DONE.
+- "action": أحد القيم: TAP_ELEMENT, TAP_COORDINATES, DOUBLE_TAP, LONG_PRESS_ELEMENT, LONG_PRESS_COORDINATES, SMART_FIND_CLICK, TYPE_TEXT, SCROLL_DOWN, SCROLL_UP, SWIPE_LEFT, SWIPE_RIGHT, DRAG, PINCH_IN, PINCH_OUT, LAUNCH_APP, OPEN_URL, OPEN_SETTINGS, GLOBAL_ACTION, MEDIA_CONTROL, DEVICE_CONTROL, LINUX_EXEC, READ_SCREEN, DEEP_READ_SCREEN, WAIT, ASK_USER, DONE.
 - "thought": سبب اختيار هذه الخطوة بالعربية.
 - "statusLabel": حالة قصيرة للظهور في الشريط.
 - "elementId": رقم العنصر [id] عند TAP_ELEMENT أو LONG_PRESS_ELEMENT أو TYPE_TEXT.
 - "x", "y": إحداثيات مطبعة 0..1000 (استخدمها فوراً في واجهات WebView/Flutter أو العناصر غير المفهرسة).
-- "text": النص عند TYPE_TEXT.
+- "text": النص عند TYPE_TEXT أو أمر الشِل عند LINUX_EXEC.
 - "submitEnter": true/false.
-- "target": نص البحث التلقائي عند SMART_FIND_CLICK (مثل "الوضع الداكن|Dark theme")، أو اسم التطبيق عند LAUNCH_APP، أو إجراء النظام عند GLOBAL_ACTION (back, home, recents, notifications, quick_settings, screenshot, lock, split_screen, all_apps)، أو أوامر DEVICE_CONTROL:
-  call:<الرقم أو الاسم>, answer_call, end_call, speaker_on, speaker_off, reply_notification:<المستلم>:<الرسالة>, read_notifications, read_whatsapp, whatsapp_send:<المستلم>:<الرسالة>, adb_toggle:<key>:<on/off>, save_note:<اسم الملف>:<المحتوى>, brightness:<up/down/auto/0..100>, dnd_on, dnd_off, mute, vibrate, normal, flashlight_on, flashlight_off, volume_up, volume_down, qs_toggle:<title>, permission_allow, permission_deny, files.
-- "steps": اختياري (مصفوفة من 2 إلى 4 خطوات متسلسلة مؤكدة لتسريع التنفيذ في خطوة واحدة، مثل النقر على حقل البحث ثم كتابة النص وإرساله فوراً).
+- "target": نص البحث التلقائي عند SMART_FIND_CLICK، أو اسم التطبيق عند LAUNCH_APP، أو أمر لينكس عند LINUX_EXEC، أو إجراء النظام عند GLOBAL_ACTION، أو أوامر DEVICE_CONTROL:
+  call:<الرقم أو الاسم>, answer_call, end_call, speaker_on, speaker_off, reply_notification:<المستلم>:<الرسالة>, read_notifications, read_whatsapp, whatsapp_send:<المستلم>:<الرسالة>, read_sms, read_calls, read_calendar, app_usage, adb_toggle:<key>:<on/off>, save_note:<اسم الملف>:<المحتوى>, brightness:<up/down/auto/0..100>, dnd_on, dnd_off, mute, vibrate, normal, flashlight_on, flashlight_off, volume_up, volume_down, qs_toggle:<title>, permission_allow, permission_deny, files.
+- "steps": اختياري (مصفوفة من 2 إلى 4 خطوات متسلسلة مؤكدة لتسريع التنفيذ في خطوة واحدة).
 - "waitMs": 300..4000 عند WAIT.
 - "finalResponse": الملخص النهائي للمستخدم عند DONE أو READ_SCREEN أو DEEP_READ_SCREEN أو ASK_USER.
 
 قواعد الذكاء والسرعة:
-- للعثور على خيار غير ظاهر بعد في قائمة طويلة أو إعدادات، استخدم SMART_FIND_CLICK مع وضع أسماء الزر في "target" (مثل "الوضع الداكن|Dark theme") بدلاً من إضاعة خطوات تمرير متكررة.
+- للعثور على خيار غير ظاهر بعد في قائمة طويلة أو إعدادات، استخدم SMART_FIND_CLICK مع وضع أسماء الزر في "target".
 - لقراءة محتوى شاشة كاملة أو طويلة أو معقدة بدقة، استخدم DEEP_READ_SCREEN.
-- عندما يتوفر عنصر بحقل إدخال، يمكنك دمج النقر + الكتابة + submitEnter في خطوة واحدة أو عبر steps لتقليل زمن الانتظار.
-- لا تستخدم ASK_USER إطلاقاً إلا لخطوة حساسة جداً مثل كلمة مرور أو رمز OTP أو دفع مالي.
+- عندما يتوفر عنصر بحقل إدخال، ادمج النقر + الكتابة + submitEnter في خطوة واحدة أو عبر steps.
+- لا تستخدم ASK_USER إطلاقاً إلا لكلمة مرور أو رمز OTP أو دفع مالي.
 """
     }
 }
